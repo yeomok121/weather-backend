@@ -1,24 +1,45 @@
-def make_advice(current: dict, forecast: list) -> list:
-    """현재 날씨와 예보를 보고 행동요령 문구 목록을 만든다."""
-    tips = []
+def make_advice(current, forecast):
+    # 1. 예보 데이터(forecast)에서 실제 리스트 배열을 안전하게 추출
+    if isinstance(forecast, dict) and "list" in forecast:
+        forecast_data = forecast["list"]
+    elif isinstance(forecast, list):
+        forecast_data = forecast
+    else:
+        forecast_data = []
 
-    # 앞으로의 최대 강수확률
-    max_pop = max((f["pop"] for f in forecast), default=0)
-    if max_pop >= 0.5:
-        tips.append("☔ 비 올 확률이 높아요. 우산을 챙기세요.")
+    # 2. 강수 확률(pop) 계산 (기상청 API에는 pop이 없으므로 안전하게 0으로 처리되도록 방어 코드 추가)
+    max_pop = 0
+    for f in forecast_data:
+        if isinstance(f, dict):
+            # 값이 없으면 0을 반환하여 에러 방지
+            pop = f.get("pop", 0) 
+            if pop > max_pop:
+                max_pop = pop
 
-    if current["feels_like"] >= 33:
-        tips.append("🥵 체감온도가 매우 높아요. 물을 자주 드세요.")
-    elif current["feels_like"] <= 0:
-        tips.append("🥶 매우 추워요. 두꺼운 외투를 입으세요.")
+    # 3. 현재 온도와 날씨 상태 추출
+    try:
+        current_temp = current.get("main", {}).get("temp", 20) # 온도가 없으면 기본값 20
+        weather_desc = current.get("weather", [{}])[0].get("description", "맑음")
+    except Exception:
+        current_temp = 20
+        weather_desc = "맑음"
 
-    if current["wind_speed"] >= 10:
-        tips.append("💨 바람이 강해요. 외출 시 주의하세요.")
-
-    # 맑은 날(아이콘 01d = 낮에 맑음)
-    if current["icon"] == "01d":
-        tips.append("☀️ 햇빛이 강해요. 양산이나 선크림을 추천해요.")
-
-    if not tips:
-        tips.append("😊 오늘은 특별한 주의사항이 없어요.")
-    return tips
+    # 4. 맞춤형 날씨 조언 문구 생성
+    if "비" in weather_desc:
+        return "현재 비가 내리고 있습니다. 우산을 꼭 챙기시고 미끄럼에 주의하세요!"
+    elif "눈" in weather_desc:
+        return "현재 눈이 내리고 있습니다. 빙판길 안전에 유의하세요."
+    
+    # 강수 확률이 높을 때 (OWM 기준 0.5 이상 또는 기상청 기준 50 이상)
+    if max_pop >= 0.5 or max_pop >= 50:
+        return "오늘 비나 눈이 올 확률이 높습니다. 외출 시 우산을 챙기시는 것이 좋습니다."
+    
+    # 온도에 따른 조언
+    if current_temp >= 28:
+        return "날씨가 많이 덥습니다. 자외선 차단에 신경 쓰고 수분을 충분히 섭취하세요."
+    elif current_temp >= 15:
+        return "야외 활동하기 좋은 날씨입니다! 쾌적한 하루 보내세요."
+    elif current_temp >= 5:
+        return "일교차가 있거나 다소 쌀쌀합니다. 따뜻한 겉옷을 챙기세요."
+    else:
+        return "날씨가 매우 춥습니다. 감기에 걸리지 않도록 따뜻하게 입으세요."
