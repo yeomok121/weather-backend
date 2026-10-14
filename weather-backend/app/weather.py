@@ -6,10 +6,12 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# 발급받으신 인증키 (이 값이 공공데이터포털 키가 맞는지 확인 필요!)
+# 💡 1. 두 개의 API 키를 모두 사용합니다.
 KMA_API_KEY = "b82bdd286e9c433b217611deeca7d0a07c8479a8eef0bf54322e76a9db669c12"
 OWM_API_KEY = os.getenv("OPENWEATHER_API_KEY")
+BASE = "https://api.openweathermap.org/data/2.5"
 
+# [기상청] 위경도 -> 격자 변환 공식
 def get_nx_ny(lat, lon):
     RE = 6371.00877; GRID = 5.0; SLAT1 = 30.0; SLAT2 = 60.0; OLON = 126.0; OLAT = 38.0; XO = 43; YO = 136
     DEGRAD = math.pi / 180.0
@@ -31,12 +33,12 @@ def get_nx_ny(lat, lon):
     ny = math.floor(ro - ra * math.cos(theta) + YO + 0.5)
     return nx, ny
 
+# [기상청] 가장 최근 발표 시간 구하기
 def get_kma_base_time():
     kst = timezone(timedelta(hours=9))
     now = datetime.now(kst) - timedelta(hours=1)
     date_str = now.strftime("%Y%m%d")
     hour = now.hour
-    
     if hour < 2:
         date_str = (now - timedelta(days=1)).strftime("%Y%m%d")
         time_str = "2300"
@@ -57,115 +59,115 @@ def get_current_weather(lat: float, lon: float):
     url = "http://apis.data.go.kr/1360000/VilageFcstInfoService_2.0/getVilageFcst"
     params = {
         "serviceKey": KMA_API_KEY,
-        "pageNo": "1",
-        "numOfRows": "50",
-        "dataType": "JSON",
-        "base_date": base_date,
-        "base_time": base_time,
-        "nx": nx,
-        "ny": ny
+        "pageNo": "1", "numOfRows": "50", "dataType": "JSON",
+        "base_date": base_date, "base_time": base_time, "nx": nx, "ny": ny
     }
     
-    res = requests.get(url, params=params)
-    print("====== [현재날씨 응답 로그] ======")
-    print(res.text) # Render 터미널에 에러 사유 기록
-    
     try:
+        res = requests.get(url, params=params, timeout=5)
         items = res.json().get("response", {}).get("body", {}).get("items", {}).get("item", [])
     except Exception:
         items = []
-        
-    if not items:
-        return {
-            "weather": [{"description": "API 오류", "icon": "01d"}],
-            "main": {"temp": 0, "humidity": 0},
-            "name": "기상청 점검 또는 키 오류"
-        }
-        
-    temp = 0; humidity = 0; sky = "1"; pty = "0"
+
+    temp = 20.0; humidity = 50; wind_speed = 0.0; sky = "1"; pty = "0"
     for item in items:
-        if item.get("category") == "TMP": temp = float(item.get("fcstValue"))
-        elif item.get("category") == "REH": humidity = float(item.get("fcstValue"))
-        elif item.get("category") == "SKY": sky = item.get("fcstValue")
-        elif item.get("category") == "PTY": pty = item.get("fcstValue")
-        
-    desc = "맑음"
-    if pty in ["1", "4"]: desc = "비"
-    elif pty == "3": desc = "눈"
-    elif pty == "2": desc = "비/눈"
-    elif sky == "3": desc = "구름많음"
-    elif sky == "4": desc = "흐림"
-        
+        cat = item.get("category")
+        val = item.get("fcstValue", "0")
+        if cat == "TMP": temp = float(val)
+        elif cat == "REH": humidity = float(val)
+        elif cat == "WSD": wind_speed = float(val)
+        elif cat == "SKY": sky = val
+        elif cat == "PTY": pty = val
+
+    desc = "맑음"; icon = "01d"
+    if pty in ["1", "4"]: desc = "비"; icon = "09d"
+    elif pty == "3": desc = "눈"; icon = "13d"
+    elif pty == "2": desc = "비/눈"; icon = "13d"
+    elif sky == "3": desc = "구름많음"; icon = "03d"
+    elif sky == "4": desc = "흐림"; icon = "04d"
+
+    # 💡 프론트엔드가 예상하는 원래 형식 그대로 리턴! (이 부분이 핵심입니다)
     return {
-        "weather": [{"description": desc, "icon": "01d"}],
-        "main": {"temp": temp, "humidity": humidity},
-        "name": "기상청 실시간 관측"
+        "city": "기상청 날씨",
+        "temp": temp,
+        "feels_like": temp,
+        "temp_max": temp + 2, 
+        "temp_min": temp - 2,
+        "humidity": humidity,
+        "wind_speed": wind_speed,
+        "description": desc,
+        "icon": icon,
     }
 
-def get_hourly_forecast(lat: float, lon: float):
+def get_hourly_forecast(lat: float, lon: float, count: int = 8):
     nx, ny = get_nx_ny(lat, lon)
     base_date, base_time = get_kma_base_time()
     
     url = "http://apis.data.go.kr/1360000/VilageFcstInfoService_2.0/getVilageFcst"
     params = {
         "serviceKey": KMA_API_KEY,
-        "pageNo": "1",
-        "numOfRows": "200",
-        "dataType": "JSON",
-        "base_date": base_date,
-        "base_time": base_time,
-        "nx": nx,
-        "ny": ny
+        "pageNo": "1", "numOfRows": "200", "dataType": "JSON",
+        "base_date": base_date, "base_time": base_time, "nx": nx, "ny": ny
     }
     
-    res = requests.get(url, params=params)
-    
     try:
+        res = requests.get(url, params=params, timeout=5)
         items = res.json().get("response", {}).get("body", {}).get("items", {}).get("item", [])
     except Exception:
         items = []
-        
-    if not items:
-        return {"list": [{"dt_txt": "2026-01-01 00:00:00", "main": {"temp": 0}, "weather": [{"description": "오류", "icon": "01d"}]}]}
-        
+
     forecast_dict = {}
     for item in items:
         ftime = f"{item['fcstDate']} {item['fcstTime']}"
         if ftime not in forecast_dict:
-            forecast_dict[ftime] = {"temp": 0, "sky": "1", "pty": "0"}
+            forecast_dict[ftime] = {"temp": 0, "sky": "1", "pty": "0", "pop": 0}
         
-        if item["category"] == "TMP": forecast_dict[ftime]["temp"] = float(item["fcstValue"])
-        elif item["category"] == "SKY": forecast_dict[ftime]["sky"] = item["fcstValue"]
-        elif item["category"] == "PTY": forecast_dict[ftime]["pty"] = item["fcstValue"]
+        cat = item["category"]
+        val = item["fcstValue"]
+        if cat == "TMP": forecast_dict[ftime]["temp"] = float(val)
+        elif cat == "SKY": forecast_dict[ftime]["sky"] = val
+        elif cat == "PTY": forecast_dict[ftime]["pty"] = val
+        elif cat == "POP": forecast_dict[ftime]["pop"] = float(val) / 100.0
         
-    hourly_list = []
-    for ftime, f_data in list(forecast_dict.items())[:8]:
-        desc = "맑음"
-        if f_data["pty"] in ["1", "4"]: desc = "비"
-        elif f_data["pty"] == "3": desc = "눈"
-        elif f_data["pty"] == "2": desc = "비/눈"
-        elif f_data["sky"] == "3": desc = "구름많음"
-        elif f_data["sky"] == "4": desc = "흐림"
+    result = []
+    for ftime, f_data in list(forecast_dict.items())[:count]:
+        desc = "맑음"; icon = "01d"
+        pty = f_data["pty"]; sky = f_data["sky"]
         
-        formatted_time = f"{ftime[:4]}-{ftime[4:6]}-{ftime[6:8]} {ftime[9:11]}:00:00"
-        hourly_list.append({
-            "dt_txt": formatted_time,
-            "main": {"temp": f_data["temp"]},
-            "weather": [{"description": desc, "icon": "01d"}]
+        if pty in ["1", "4"]: desc = "비"; icon = "09d"
+        elif pty == "3": desc = "눈"; icon = "13d"
+        elif pty == "2": desc = "비/눈"; icon = "13d"
+        elif sky == "3": desc = "구름많음"; icon = "03d"
+        elif sky == "4": desc = "흐림"; icon = "04d"
+        
+        # 💡 시간별 예보도 원래 프론트엔드 포맷으로 리턴
+        result.append({
+            "time": f"{ftime[8:10]}시",
+            "temp": f_data["temp"],
+            "pop": f_data["pop"],
+            "description": desc,
+            "icon": icon
         })
-        
-    return {"list": hourly_list}
+    return result
 
-def search_location(query: str):
-    url = f"http://api.openweathermap.org/geo/1.0/direct?q={query}&limit=5&appid={OWM_API_KEY}"
-    res = requests.get(url)
-    return res.json() if res.status_code == 200 else []
+# 검색과 대기질은 OWM 유지 (.env 키 사용)
+def search_location(q: str):
+    res = requests.get(
+        "https://api.openweathermap.org/geo/1.0/direct",
+        params={"q": q, "limit": 1, "appid": OWM_API_KEY}, timeout=5)
+    data = res.json()
+    if not data: return None
+    return {"name": data[0]["name"], "lat": data[0]["lat"], "lon": data[0]["lon"]}
 
 def get_air_quality(lat: float, lon: float):
-    url = f"http://api.openweathermap.org/data/2.5/air_pollution?lat={lat}&lon={lon}&appid={OWM_API_KEY}"
-    res = requests.get(url)
-    if res.status_code == 200:
-        data = res.json()
-        aqi = data['list'][0]['main']['aqi']
-        return {"aqi": aqi}
-    return {"aqi": 1}
+    res = requests.get(
+        f"{BASE}/air_pollution",
+        params={"lat": lat, "lon": lon, "appid": OWM_API_KEY}, timeout=5)
+    item = res.json()["list"][0]
+    pm25 = item["components"]["pm2_5"]
+
+    if pm25 <= 15: level = "좋음"
+    elif pm25 <= 35: level = "보통"
+    elif pm25 <= 75: level = "나쁨"
+    else: level = "매우나쁨"
+    return {"pm25": round(pm25), "pm10": round(item["components"]["pm10"]), "level": level}
