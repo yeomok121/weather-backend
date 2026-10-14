@@ -1,0 +1,21 @@
+//터미널에서 한 줄씩 따로 입력
+
+cd weather-backend
+
+Remove-Item -Recurse -Force venv
+
+python -m venv venv
+
+.\venv\Scripts\activate
+
+pip install fastapi uvicorn requests python-dotenv
+
+$env:PYTHONPATH="."
+
+uvicorn app.main:app --reload
+
+
+
+//아래 브라우저에서 실행
+http://127.0.0.1:8000/api/weather/summary?lat=37.5034&lon=126.7660
+http://127.0.0.1:8000/docs
