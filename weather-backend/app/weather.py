@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# 두 개의 API 키를 모두 사용합니다.
+# 기상청 API 키 및 OpenWeatherMap API 키
 KMA_API_KEY = "b82bdd286e9c433b217611deeca7d0a07c8479a8eef0bf54322e76a9db669c12"
 OWM_API_KEY = os.getenv("OPENWEATHER_API_KEY")
 BASE = "https://api.openweathermap.org/data/2.5"
@@ -55,11 +55,14 @@ def get_kma_base_time():
 def get_current_weather(lat: float, lon: float):
     nx, ny = get_nx_ny(lat, lon)
     base_date, base_time = get_kma_base_time()
+    kst = timezone(timedelta(hours=9))
+    today_str = datetime.now(kst).strftime("%Y%m%d")
     
     url = "http://apis.data.go.kr/1360000/VilageFcstInfoService_2.0/getVilageFcst"
     params = {
         "serviceKey": KMA_API_KEY,
-        "pageNo": "1", "numOfRows": "60", "dataType": "JSON",
+        # 오늘 하루치 최고/최저 기온을 모두 찾기 위해 300개를 요청합니다.
+        "pageNo": "1", "numOfRows": "300", "dataType": "JSON",
         "base_date": base_date, "base_time": base_time, "nx": nx, "ny": ny
     }
     
@@ -70,21 +73,67 @@ def get_current_weather(lat: float, lon: float):
         items = []
 
     temp = 20.0; humidity = 50; wind_speed = 0.0; sky = "1"; pty = "0"
+    tmx = None; tmn = None
+    today_temps = []
     
     if items:
-        # 가장 첫 번째(현재와 가장 가까운) 예보 시간의 데이터만 정확히 추출
+        # 현재와 가장 가까운 예보 시간의 데이터 추출
         target_date = items[0].get("fcstDate")
         target_time = items[0].get("fcstTime")
         
         for item in items:
-            if item.get("fcstDate") == target_date and item.get("fcstTime") == target_time:
-                cat = item.get("category")
-                val = item.get("fcstValue", "0")
+            f_date = item.get("fcstDate")
+            f_time = item.get("fcstTime")
+            cat = item.get("category")
+            val = item.get("fcstValue", "0")
+            
+            # 1) 현재 날씨 상태 추출
+            if f_date == target_date and f_time == target_time:
                 if cat == "TMP": temp = float(val)
                 elif cat == "REH": humidity = float(val)
                 elif cat == "WSD": wind_speed = float(val)
                 elif cat == "SKY": sky = str(val)
                 elif cat == "PTY": pty = str(val)
+                
+            # 2) 오늘 날짜의 실제 최고기온(TMX), 최저기온(TMN) 및 시간별 기온 수집
+            if f_date == today_str:
+                if cat == "TMX": tmx = float(val)
+                elif cat == "TMN": tmn = float(val)
+                elif cat == "TMP": today_temps.append(float(val))
+
+    # 💡 기상청 발표 시간에 따라 TMX/TMN이 지나갔을 경우, 오늘 시간별 온도 중 최고/최저값으로 정확히 보완
+    if today_temps:
+        temp_max = round(tmx if tmx is not None else max(today_temps))
+        temp_min = round(tmn if tmn is not None else min(today_temps))
+    else:
+        temp_max = round(tmx if tmx is not None else temp + 2)
+        temp_min = round(tmn if tmn is not None else temp - 2)
+
+    # 현재 온도가 최고/최저 범위를 벗어나지 않도록 자연스럽게 보정
+    if temp > temp_max: temp_max = round(temp)
+    if temp < temp_min: temp_min = round(temp)
+
+    # 💡 OpenWeatherMap에서 실제 일출(sunrise), 일몰(sunset), 체감온도(feels_like) 가져오기
+    sunrise_str = "06:00"
+    sunset_str = "18:30"
+    feels_like = temp
+    try:
+        owm_res = requests.get(
+            f"{BASE}/weather",
+            params={"lat": lat, "lon": lon, "appid": OWM_API_KEY, "units": "metric"},
+            timeout=5
+        )
+        if owm_res.status_code == 200:
+            owm_data = owm_res.json()
+            sys_data = owm_data.get("sys", {})
+            if "sunrise" in sys_data:
+                sunrise_str = datetime.fromtimestamp(sys_data["sunrise"], kst).strftime("%H:%M")
+            if "sunset" in sys_data:
+                sunset_str = datetime.fromtimestamp(sys_data["sunset"], kst).strftime("%H:%M")
+            if "main" in owm_data and "feels_like" in owm_data["main"]:
+                feels_like = round(owm_data["main"]["feels_like"], 1)
+    except Exception:
+        pass
 
     desc = "맑음"; icon = "01d"
     if pty in ["1", "4"]: desc = "비"; icon = "09d"
@@ -95,17 +144,18 @@ def get_current_weather(lat: float, lon: float):
 
     return {
         "city": "기상청 실시간",
-        "temp": temp,
-        "feels_like": temp,
-        "temp_max": temp + 2, 
-        "temp_min": temp - 2,
-        "humidity": humidity,
+        "temp": round(temp),
+        "feels_like": round(feels_like),
+        "temp_max": temp_max, 
+        "temp_min": temp_min,
+        "humidity": int(humidity),
         "wind_speed": wind_speed,
         "description": desc,
         "icon": icon,
+        "sunrise": sunrise_str, # 💡 실제 일출 시간 추가
+        "sunset": sunset_str,   # 💡 실제 일몰 시간 추가
     }
 
-# 💡 1시간 간격으로 최대 24시간(count=24)의 예보를 가져오도록 수정!
 def get_hourly_forecast(lat: float, lon: float, count: int = 24):
     nx, ny = get_nx_ny(lat, lon)
     base_date, base_time = get_kma_base_time()
@@ -113,7 +163,6 @@ def get_hourly_forecast(lat: float, lon: float, count: int = 24):
     url = "http://apis.data.go.kr/1360000/VilageFcstInfoService_2.0/getVilageFcst"
     params = {
         "serviceKey": KMA_API_KEY,
-        # 24시간 치(1시간 간격) 데이터를 모두 받기 위해 350개로 넉넉하게 요청
         "pageNo": "1", "numOfRows": "350", "dataType": "JSON",
         "base_date": base_date, "base_time": base_time, "nx": nx, "ny": ny
     }
@@ -124,14 +173,12 @@ def get_hourly_forecast(lat: float, lon: float, count: int = 24):
     except Exception:
         items = []
 
-    # 현재 한국 시간 기준 문자열 (이미 지나간 과거 시간 예보를 걸러내기 위함)
     kst = timezone(timedelta(hours=9))
     now_str = datetime.now(kst).strftime("%Y%m%d %H00")
 
     forecast_dict = {}
     for item in items:
         ftime = f"{item['fcstDate']} {item['fcstTime']}"
-        # 현재 시간보다 이전 데이터는 건너뜀
         if ftime < now_str:
             continue
             
@@ -146,7 +193,6 @@ def get_hourly_forecast(lat: float, lon: float, count: int = 24):
         elif cat == "POP": forecast_dict[ftime]["pop"] = float(val) / 100.0
         
     result = []
-    # 시간순으로 정렬하여 최대 24개(24시간)까지만 추출
     sorted_times = sorted(forecast_dict.keys())[:count]
     
     for ftime in sorted_times:
@@ -160,20 +206,17 @@ def get_hourly_forecast(lat: float, lon: float, count: int = 24):
         elif sky == "3": desc = "구름많음"; icon = "03d"
         elif sky == "4": desc = "흐림"; icon = "04d"
         
-        # 💡 [핵심 수정] ftime("YYYYMMDD HHMM")에서 인덱스 9~11을 뽑아 정확한 시간 표시!
-        # 예: "00" -> "0시", "18" -> "18시"로 깔끔하게 변환
         hour_num = int(ftime[9:11])
         
         result.append({
             "time": f"{hour_num}시",
-            "temp": f_data["temp"],
+            "temp": round(f_data["temp"]),
             "pop": f_data["pop"],
             "description": desc,
             "icon": icon
         })
     return result
 
-# 검색과 대기질은 OWM 유지 (방어 코드 포함)
 def search_location(q: str):
     try:
         res = requests.get(
@@ -187,7 +230,11 @@ def search_location(q: str):
         if not isinstance(data, list) or len(data) == 0:
             return None
             
-        return {"name": data[0].get("name", q), "lat": data[0].get("lat", 0), "lon": data[0].get("lon", 0)}
+        # 한국어 도시 이름이 있으면 우선 사용
+        local_names = data[0].get("local_names", {})
+        kor_name = local_names.get("ko", data[0].get("name", q))
+        
+        return {"name": kor_name, "lat": data[0].get("lat", 0), "lon": data[0].get("lon", 0)}
     except Exception:
         return None
 
