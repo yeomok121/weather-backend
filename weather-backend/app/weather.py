@@ -59,7 +59,7 @@ def get_current_weather(lat: float, lon: float):
     url = "http://apis.data.go.kr/1360000/VilageFcstInfoService_2.0/getVilageFcst"
     params = {
         "serviceKey": KMA_API_KEY,
-        "pageNo": "1", "numOfRows": "50", "dataType": "JSON",
+        "pageNo": "1", "numOfRows": "60", "dataType": "JSON",
         "base_date": base_date, "base_time": base_time, "nx": nx, "ny": ny
     }
     
@@ -70,14 +70,21 @@ def get_current_weather(lat: float, lon: float):
         items = []
 
     temp = 20.0; humidity = 50; wind_speed = 0.0; sky = "1"; pty = "0"
-    for item in items:
-        cat = item.get("category")
-        val = item.get("fcstValue", "0")
-        if cat == "TMP": temp = float(val)
-        elif cat == "REH": humidity = float(val)
-        elif cat == "WSD": wind_speed = float(val)
-        elif cat == "SKY": sky = val
-        elif cat == "PTY": pty = val
+    
+    if items:
+        # 가장 첫 번째(현재와 가장 가까운) 예보 시간의 데이터만 정확히 추출
+        target_date = items[0].get("fcstDate")
+        target_time = items[0].get("fcstTime")
+        
+        for item in items:
+            if item.get("fcstDate") == target_date and item.get("fcstTime") == target_time:
+                cat = item.get("category")
+                val = item.get("fcstValue", "0")
+                if cat == "TMP": temp = float(val)
+                elif cat == "REH": humidity = float(val)
+                elif cat == "WSD": wind_speed = float(val)
+                elif cat == "SKY": sky = str(val)
+                elif cat == "PTY": pty = str(val)
 
     desc = "맑음"; icon = "01d"
     if pty in ["1", "4"]: desc = "비"; icon = "09d"
@@ -98,14 +105,16 @@ def get_current_weather(lat: float, lon: float):
         "icon": icon,
     }
 
-def get_hourly_forecast(lat: float, lon: float, count: int = 8):
+# 💡 1시간 간격으로 최대 24시간(count=24)의 예보를 가져오도록 수정!
+def get_hourly_forecast(lat: float, lon: float, count: int = 24):
     nx, ny = get_nx_ny(lat, lon)
     base_date, base_time = get_kma_base_time()
     
     url = "http://apis.data.go.kr/1360000/VilageFcstInfoService_2.0/getVilageFcst"
     params = {
         "serviceKey": KMA_API_KEY,
-        "pageNo": "1", "numOfRows": "200", "dataType": "JSON",
+        # 24시간 치(1시간 간격) 데이터를 모두 받기 위해 350개로 넉넉하게 요청
+        "pageNo": "1", "numOfRows": "350", "dataType": "JSON",
         "base_date": base_date, "base_time": base_time, "nx": nx, "ny": ny
     }
     
@@ -115,21 +124,33 @@ def get_hourly_forecast(lat: float, lon: float, count: int = 8):
     except Exception:
         items = []
 
+    # 현재 한국 시간 기준 문자열 (이미 지나간 과거 시간 예보를 걸러내기 위함)
+    kst = timezone(timedelta(hours=9))
+    now_str = datetime.now(kst).strftime("%Y%m%d %H00")
+
     forecast_dict = {}
     for item in items:
         ftime = f"{item['fcstDate']} {item['fcstTime']}"
+        # 현재 시간보다 이전 데이터는 건너뜀
+        if ftime < now_str:
+            continue
+            
         if ftime not in forecast_dict:
-            forecast_dict[ftime] = {"temp": 0, "sky": "1", "pty": "0", "pop": 0}
+            forecast_dict[ftime] = {"temp": 0.0, "sky": "1", "pty": "0", "pop": 0.0}
         
         cat = item["category"]
         val = item["fcstValue"]
         if cat == "TMP": forecast_dict[ftime]["temp"] = float(val)
-        elif cat == "SKY": forecast_dict[ftime]["sky"] = val
-        elif cat == "PTY": forecast_dict[ftime]["pty"] = val
+        elif cat == "SKY": forecast_dict[ftime]["sky"] = str(val)
+        elif cat == "PTY": forecast_dict[ftime]["pty"] = str(val)
         elif cat == "POP": forecast_dict[ftime]["pop"] = float(val) / 100.0
         
     result = []
-    for ftime, f_data in list(forecast_dict.items())[:count]:
+    # 시간순으로 정렬하여 최대 24개(24시간)까지만 추출
+    sorted_times = sorted(forecast_dict.keys())[:count]
+    
+    for ftime in sorted_times:
+        f_data = forecast_dict[ftime]
         desc = "맑음"; icon = "01d"
         pty = f_data["pty"]; sky = f_data["sky"]
         
@@ -139,8 +160,12 @@ def get_hourly_forecast(lat: float, lon: float, count: int = 8):
         elif sky == "3": desc = "구름많음"; icon = "03d"
         elif sky == "4": desc = "흐림"; icon = "04d"
         
+        # 💡 [핵심 수정] ftime("YYYYMMDD HHMM")에서 인덱스 9~11을 뽑아 정확한 시간 표시!
+        # 예: "00" -> "0시", "18" -> "18시"로 깔끔하게 변환
+        hour_num = int(ftime[9:11])
+        
         result.append({
-            "time": f"{ftime[8:10]}시",
+            "time": f"{hour_num}시",
             "temp": f_data["temp"],
             "pop": f_data["pop"],
             "description": desc,
@@ -148,8 +173,7 @@ def get_hourly_forecast(lat: float, lon: float, count: int = 8):
         })
     return result
 
-
-# 💡 [핵심 해결 부분] OWM에서 에러가 나도 절대 서버가 죽지 않게 방어 코드 적용!
+# 검색과 대기질은 OWM 유지 (방어 코드 포함)
 def search_location(q: str):
     try:
         res = requests.get(
