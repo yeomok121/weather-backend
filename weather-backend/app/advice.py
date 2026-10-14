@@ -44,7 +44,6 @@ def get_ai_briefing(current: dict, air_quality: dict) -> str:
     )
     
     try:
-        # 💡 gemini-1.5-flash 로 정확한 모델명 수정 완료!
         url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
         payload = {"contents": [{"parts": [{"text": prompt}]}]}
         res = requests.post(url, json=payload, timeout=8) 
@@ -52,6 +51,12 @@ def get_ai_briefing(current: dict, air_quality: dict) -> str:
         if res.status_code == 200:
             return res.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
         else:
-            return f"AI 멘트를 불러오지 못했습니다. (코드: {res.status_code})"
-    except Exception:
-        return "AI 서버 연결이 지연되고 있습니다. 잠시 후 새로고침 해주세요."
+            # 💡 구글 서버가 응답한 '진짜 에러 이유'를 화면에 그대로 띄워줍니다!
+            try:
+                error_msg = res.json().get("error", {}).get("message", "알 수 없는 에러")
+            except:
+                error_msg = res.text
+            return f"❌ AI 에러 (코드: {res.status_code})\n사유: {error_msg}"
+            
+    except Exception as e:
+        return f"AI 서버 연결 실패: {str(e)}"
