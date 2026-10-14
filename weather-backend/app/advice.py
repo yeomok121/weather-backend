@@ -47,8 +47,8 @@ def get_ai_briefing(current: dict, air_quality: dict) -> str:
     )
     
     try:
-        # 💡 최신 공식 권장 모델인 gemini-3.0-flash로 변경!
-        model = genai.GenerativeModel('gemini-3.0-flash')
+        # 💡 공식 표준 모델인 gemini-1.5-flash 지정
+        model = genai.GenerativeModel('gemini-1.5-flash')
         response = model.generate_content(prompt)
         
         if response and response.text:
