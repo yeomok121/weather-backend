@@ -1,14 +1,15 @@
 from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
 import requests
 from app.advice import make_advice
 from app.weather import get_current_weather, get_hourly_forecast, search_location, get_air_quality
+from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI()
 
+# 💡 세상 어디서든(Vercel 포함) 내 백엔드에 접근할 수 있도록 모든 도메인 허용("*")으로 변경
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # 💡 배포된 웹사이트에서도 접속할 수 있도록 전체 허용으로 변경
+    allow_origins=["*"],  
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -33,6 +34,7 @@ def hourly(lat: float, lon: float):
 
 @app.get("/api/weather/summary")
 def summary(lat: float, lon: float):
+    """메인 화면용: 현재 날씨 + 시간별 예보 + 알림 문구 + 대기질(미세먼지) 데이터를 한 번에 반환합니다."""
     try:
         current = get_current_weather(lat, lon)
         forecast = get_hourly_forecast(lat, lon)
