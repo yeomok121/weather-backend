@@ -106,8 +106,6 @@ def get_current_weather(lat: float, lon: float):
 
     sunrise_str = "06:00"; sunset_str = "18:30"
     feels_like = temp
-    
-    # 💡 낮과 밤을 판단하는 변수 (기본값: 낮)
     is_day = True 
 
     try:
@@ -124,18 +122,14 @@ def get_current_weather(lat: float, lon: float):
             if "sunrise" in sys_data and "sunset" in sys_data:
                 sunrise_str = datetime.fromtimestamp(sys_data["sunrise"], kst).strftime("%H:%M")
                 sunset_str = datetime.fromtimestamp(sys_data["sunset"], kst).strftime("%H:%M")
-                
-                # 현재 시간이 일출 전이거나 일몰 후면 밤(Night)으로 설정
                 if now_ts < sys_data["sunrise"] or now_ts > sys_data["sunset"]:
                     is_day = False
                     
             if "main" in owm_data and "feels_like" in owm_data["main"]:
                 feels_like = round(owm_data["main"]["feels_like"], 1)
     except Exception:
-        # 에러 발생 시 대략적인 시간(오전 6시 ~ 오후 6시)으로 낮/밤 계산
         is_day = 6 <= now.hour < 18
 
-    # 💡 낮(d)과 밤(n)에 따라 아이콘 접미사 변경!
     suffix = "d" if is_day else "n"
     desc = "맑음"; icon = f"01{suffix}"
     if pty in ["1", "4"]: desc = "비"; icon = f"09{suffix}"
@@ -194,7 +188,6 @@ def get_hourly_forecast(lat: float, lon: float, count: int = 24):
         pty = f_data["pty"]; sky = f_data["sky"]
         hour_num = int(ftime[9:11])
         
-        # 💡 예보 시간대도 오전 6시~오후 6시는 낮(d), 그 외는 밤(n)으로 설정
         is_day = 6 <= hour_num < 18
         suffix = "d" if is_day else "n"
         
@@ -210,6 +203,57 @@ def get_hourly_forecast(lat: float, lon: float, count: int = 24):
             "pop": f_data["pop"], "description": desc, "icon": icon
         })
     return result
+
+# 💡 주간(5일) 예보를 가져오는 함수 추가
+def get_weekly_forecast(lat: float, lon: float):
+    try:
+        res = requests.get(
+            f"{BASE}/forecast",
+            params={"lat": lat, "lon": lon, "appid": OWM_API_KEY, "units": "metric", "lang": "kr"},
+            timeout=5
+        )
+        if res.status_code != 200: return []
+        data = res.json()
+        
+        daily_data = {}
+        for item in data.get("list", []):
+            date_str = item["dt_txt"].split(" ")[0]
+            temp = item["main"]["temp"]
+            pop = item.get("pop", 0)
+            icon = item["weather"][0]["icon"]
+            
+            if date_str not in daily_data:
+                daily_data[date_str] = {"temps": [], "pops": [], "icons": []}
+            daily_data[date_str]["temps"].append(temp)
+            daily_data[date_str]["pops"].append(pop)
+            daily_data[date_str]["icons"].append(icon)
+        
+        result = []
+        kst = timezone(timedelta(hours=9))
+        today_str = datetime.now(kst).strftime("%Y-%m-%d")
+        days_kr = ["월", "화", "수", "목", "금", "토", "일"]
+        
+        for d_str, d_info in daily_data.items():
+            d_obj = datetime.strptime(d_str, "%Y-%m-%d")
+            weekday = days_kr[d_obj.weekday()]
+            
+            # 하루 중 가장 대표적인 날씨 아이콘 추출
+            icons = d_info["icons"]
+            day_icons = [ic for ic in icons if "d" in ic]
+            rep_icon = day_icons[len(day_icons)//2] if day_icons else icons[0]
+            
+            result.append({
+                "date": f"{d_obj.month}/{d_obj.day}",
+                "day": weekday,
+                "isToday": d_str == today_str,
+                "temp_max": round(max(d_info["temps"])),
+                "temp_min": round(min(d_info["temps"])),
+                "pop": round(max(d_info["pops"]) * 100),
+                "icon": rep_icon
+            })
+        return result[:5]
+    except Exception:
+        return []
 
 def search_location(q: str):
     try:
