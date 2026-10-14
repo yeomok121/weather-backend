@@ -1,9 +1,12 @@
 import os
-import requests
+import google.generativeai as genai
 from dotenv import load_dotenv
 
 load_dotenv()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
 
 def make_advice(current: dict, forecast: list) -> list:
     tips = []
@@ -44,19 +47,14 @@ def get_ai_briefing(current: dict, air_quality: dict) -> str:
     )
     
     try:
-        # 💡 v1beta -> 안정적인 정식 v1 엔드포인트로 변경 완료!
-        url = f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
-        payload = {"contents": [{"parts": [{"text": prompt}]}]}
-        res = requests.post(url, json=payload, timeout=8) 
+        # 💡 공식 SDK를 사용하여 버전/URL 충돌 문제 원천 해결
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        response = model.generate_content(prompt)
         
-        if res.status_code == 200:
-            return res.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+        if response and response.text:
+            return response.text.strip()
         else:
-            try:
-                error_msg = res.json().get("error", {}).get("message", "알 수 없는 에러")
-            except:
-                error_msg = res.text
-            return f"❌ AI 에러 (코드: {res.status_code})\n사유: {error_msg}"
+            return "AI 응답을 받아오지 못했습니다."
             
     except Exception as e:
-        return f"AI 서버 연결 실패: {str(e)}"
+        return f"❌ AI 에러 발생: {str(e)}"
