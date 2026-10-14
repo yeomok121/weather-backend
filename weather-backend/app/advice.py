@@ -44,14 +44,14 @@ def get_ai_briefing(current: dict, air_quality: dict) -> str:
     )
     
     try:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+        # 💡 v1beta -> 안정적인 정식 v1 엔드포인트로 변경 완료!
+        url = f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
         payload = {"contents": [{"parts": [{"text": prompt}]}]}
         res = requests.post(url, json=payload, timeout=8) 
         
         if res.status_code == 200:
             return res.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
         else:
-            # 💡 구글 서버가 응답한 '진짜 에러 이유'를 화면에 그대로 띄워줍니다!
             try:
                 error_msg = res.json().get("error", {}).get("message", "알 수 없는 에러")
             except:
