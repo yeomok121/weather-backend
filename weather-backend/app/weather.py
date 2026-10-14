@@ -160,7 +160,6 @@ def search_location(q: str):
             return None
             
         data = res.json()
-        # 데이터가 정상적인 리스트 형태가 아니면(에러 메세지면) 멈추지 않고 스킵
         if not isinstance(data, list) or len(data) == 0:
             return None
             
