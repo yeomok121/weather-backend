@@ -47,8 +47,8 @@ def get_ai_briefing(current: dict, air_quality: dict) -> str:
     )
     
     try:
-        # 💡 공식 SDK를 사용하여 버전/URL 충돌 문제 원천 해결
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        # 💡 최신 모델인 gemini-2.0-flash로 설정
+        model = genai.GenerativeModel('gemini-2.0-flash')
         response = model.generate_content(prompt)
         
         if response and response.text:
