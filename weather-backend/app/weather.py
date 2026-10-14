@@ -6,21 +6,15 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# 발급받으신 기상청 API 인증키
+# 발급받으신 인증키 (이 값이 공공데이터포털 키가 맞는지 확인 필요!)
 KMA_API_KEY = "b82bdd286e9c433b217611deeca7d0a07c8479a8eef0bf54322e76a9db669c12"
-
-# (유지) 지역 검색과 미세먼지를 위한 기존 OWM 키
 OWM_API_KEY = os.getenv("OPENWEATHER_API_KEY")
 
-# [1] 기상청 전용: 위경도를 X, Y 격자 좌표로 변환하는 공식
 def get_nx_ny(lat, lon):
     RE = 6371.00877; GRID = 5.0; SLAT1 = 30.0; SLAT2 = 60.0; OLON = 126.0; OLAT = 38.0; XO = 43; YO = 136
     DEGRAD = math.pi / 180.0
     re = RE / GRID
-    slat1 = SLAT1 * DEGRAD
-    slat2 = SLAT2 * DEGRAD
-    olon = OLON * DEGRAD
-    olat = OLAT * DEGRAD
+    slat1 = SLAT1 * DEGRAD; slat2 = SLAT2 * DEGRAD; olon = OLON * DEGRAD; olat = OLAT * DEGRAD
     sn = math.tan(math.pi * 0.25 + slat2 * 0.5) / math.tan(math.pi * 0.25 + slat1 * 0.5)
     sn = math.log(math.cos(slat1) / math.cos(slat2)) / math.log(sn)
     sf = math.tan(math.pi * 0.25 + slat1 * 0.5)
@@ -37,10 +31,9 @@ def get_nx_ny(lat, lon):
     ny = math.floor(ro - ra * math.cos(theta) + YO + 0.5)
     return nx, ny
 
-# [2] 기상청 전용: 단기예보 발표 기준 시간 계산 (02, 05, 08, 11, 14, 17, 20, 23시)
 def get_kma_base_time():
     kst = timezone(timedelta(hours=9))
-    now = datetime.now(kst) - timedelta(hours=1) # 안정적인 조회를 위해 1시간 전 기준
+    now = datetime.now(kst) - timedelta(hours=1)
     date_str = now.strftime("%Y%m%d")
     hour = now.hour
     
@@ -57,7 +50,6 @@ def get_kma_base_time():
     else: time_str = "2300"
     return date_str, time_str
 
-# [3] 기상청 API 연동: 현재 날씨
 def get_current_weather(lat: float, lon: float):
     nx, ny = get_nx_ny(lat, lon)
     base_date, base_time = get_kma_base_time()
@@ -75,8 +67,21 @@ def get_current_weather(lat: float, lon: float):
     }
     
     res = requests.get(url, params=params)
-    items = res.json().get("response", {}).get("body", {}).get("items", {}).get("item", [])
+    print("====== [현재날씨 응답 로그] ======")
+    print(res.text) # Render 터미널에 에러 사유 기록
     
+    try:
+        items = res.json().get("response", {}).get("body", {}).get("items", {}).get("item", [])
+    except Exception:
+        items = []
+        
+    if not items:
+        return {
+            "weather": [{"description": "API 오류", "icon": "01d"}],
+            "main": {"temp": 0, "humidity": 0},
+            "name": "기상청 점검 또는 키 오류"
+        }
+        
     temp = 0; humidity = 0; sky = "1"; pty = "0"
     for item in items:
         if item.get("category") == "TMP": temp = float(item.get("fcstValue"))
@@ -97,7 +102,6 @@ def get_current_weather(lat: float, lon: float):
         "name": "기상청 실시간 관측"
     }
 
-# [4] 기상청 API 연동: 시간별 날씨
 def get_hourly_forecast(lat: float, lon: float):
     nx, ny = get_nx_ny(lat, lon)
     base_date, base_time = get_kma_base_time()
@@ -115,8 +119,15 @@ def get_hourly_forecast(lat: float, lon: float):
     }
     
     res = requests.get(url, params=params)
-    items = res.json().get("response", {}).get("body", {}).get("items", {}).get("item", [])
     
+    try:
+        items = res.json().get("response", {}).get("body", {}).get("items", {}).get("item", [])
+    except Exception:
+        items = []
+        
+    if not items:
+        return {"list": [{"dt_txt": "2026-01-01 00:00:00", "main": {"temp": 0}, "weather": [{"description": "오류", "icon": "01d"}]}]}
+        
     forecast_dict = {}
     for item in items:
         ftime = f"{item['fcstDate']} {item['fcstTime']}"
@@ -145,7 +156,6 @@ def get_hourly_forecast(lat: float, lon: float):
         
     return {"list": hourly_list}
 
-# [5] 위치 검색 및 미세먼지는 기상청에 없으므로 기존(OWM) 유지
 def search_location(query: str):
     url = f"http://api.openweathermap.org/geo/1.0/direct?q={query}&limit=5&appid={OWM_API_KEY}"
     res = requests.get(url)
