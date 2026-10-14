@@ -204,7 +204,7 @@ def get_hourly_forecast(lat: float, lon: float, count: int = 24):
         })
     return result
 
-# 💡 주간(5일) 예보를 가져오는 함수 추가
+# 💡 안전장치(try-except 및 get)를 강화하여 서버 에러로 인한 주간 예보 증발 현상을 막았습니다!
 def get_weekly_forecast(lat: float, lon: float):
     try:
         res = requests.get(
@@ -217,10 +217,15 @@ def get_weekly_forecast(lat: float, lon: float):
         
         daily_data = {}
         for item in data.get("list", []):
-            date_str = item["dt_txt"].split(" ")[0]
-            temp = item["main"]["temp"]
+            dt_txt = item.get("dt_txt", "")
+            if not dt_txt: continue
+            
+            date_str = dt_txt.split(" ")[0]
+            main_data = item.get("main", {})
+            temp = main_data.get("temp", 20)
             pop = item.get("pop", 0)
-            icon = item["weather"][0]["icon"]
+            weather_list = item.get("weather", [])
+            icon = weather_list[0].get("icon", "01d") if weather_list else "01d"
             
             if date_str not in daily_data:
                 daily_data[date_str] = {"temps": [], "pops": [], "icons": []}
@@ -234,21 +239,29 @@ def get_weekly_forecast(lat: float, lon: float):
         days_kr = ["월", "화", "수", "목", "금", "토", "일"]
         
         for d_str, d_info in daily_data.items():
-            d_obj = datetime.strptime(d_str, "%Y-%m-%d")
-            weekday = days_kr[d_obj.weekday()]
+            try:
+                d_obj = datetime.strptime(d_str, "%Y-%m-%d")
+                weekday = days_kr[d_obj.weekday()]
+            except Exception:
+                continue
             
-            # 하루 중 가장 대표적인 날씨 아이콘 추출
             icons = d_info["icons"]
             day_icons = [ic for ic in icons if "d" in ic]
-            rep_icon = day_icons[len(day_icons)//2] if day_icons else icons[0]
+            rep_icon = day_icons[len(day_icons)//2] if day_icons else (icons[0] if icons else "01d")
+            
+            temps = d_info["temps"]
+            pops = d_info["pops"]
+            
+            if not temps: temps = [20]
+            if not pops: pops = [0]
             
             result.append({
                 "date": f"{d_obj.month}/{d_obj.day}",
                 "day": weekday,
                 "isToday": d_str == today_str,
-                "temp_max": round(max(d_info["temps"])),
-                "temp_min": round(min(d_info["temps"])),
-                "pop": round(max(d_info["pops"]) * 100),
+                "temp_max": round(max(temps)),
+                "temp_min": round(min(temps)),
+                "pop": round(max(pops) * 100),
                 "icon": rep_icon
             })
         return result[:5]
