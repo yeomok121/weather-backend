@@ -99,4 +99,10 @@ def get_ai_contents(current: dict, forecast: list, air_quality: dict) -> dict:
             return {"one_line": fallback_advice, "briefing": "AI 응답을 받아오지 못했습니다."}
             
     except Exception as e:
+        error_str = str(e).lower()
+        if "429" in error_str or "quota" in error_str:
+            return {
+                "one_line": fallback_advice, 
+                "briefing": "오늘 AI가 너무 많은 날씨를 분석해서 잠시 휴식 중이에요! 💤 내일 다시 다정하고 똑똑한 브리핑으로 돌아올게요. (현재 기본 예보 정보는 정상 제공 중입니다)"
+            }
         return {"one_line": fallback_advice, "briefing": f"❌ AI 에러 발생: {str(e)}"}
