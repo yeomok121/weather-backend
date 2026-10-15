@@ -47,8 +47,26 @@ def get_ai_briefing(current: dict, air_quality: dict) -> str:
     )
     
     try:
-        # 💡 공식 표준 모델인 gemini-1.5-flash 지정
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        # 💡 1. 내 API 키에서 텍스트 생성(generateContent)이 가능한 모델 목록을 직접 조회
+        available_models = [
+            m.name for m in genai.list_models() 
+            if 'generateContent' in m.supported_generation_methods
+        ]
+        
+        if not available_models:
+            return "❌ 현재 API 키로 사용 가능한 AI 모델이 없습니다."
+
+        # 💡 2. 목록 중 가장 최신(3.0 또는 flash) 모델을 우선 선택 (없으면 첫 번째 가능 모델 선택)
+        target_model = available_models[0]
+        for m in available_models:
+            if '3' in m and 'flash' in m:
+                target_model = m
+                break
+            elif 'flash' in m:
+                target_model = m
+
+        # 💡 3. 구글 서버가 직접 확인해 준 100% 존재하는 모델명으로 호출 (404 에러 원천 차단)
+        model = genai.GenerativeModel(target_model)
         response = model.generate_content(prompt)
         
         if response and response.text:
