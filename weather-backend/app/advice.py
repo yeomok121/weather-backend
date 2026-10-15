@@ -8,6 +8,7 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
 
+# 비상용 기본 한 줄 멘트 함수 (AI 키가 없거나 오류 시 작동)
 def make_advice(current: dict, forecast: list) -> list:
     tips = []
     temp = current.get("temp", 20)
@@ -30,33 +31,42 @@ def make_advice(current: dict, forecast: list) -> list:
         
     return tips
 
-def get_ai_briefing(current: dict, air_quality: dict) -> str:
+# 💡 한 줄 멘트와 상세 브리핑을 동시에 생성하는 함수
+def get_ai_contents(current: dict, forecast: list, air_quality: dict) -> dict:
+    fallback_advice = " ".join(make_advice(current, forecast))
+    
     if not GEMINI_API_KEY:
-        return "🔑 백엔드의 .env 파일과 Render에 'GEMINI_API_KEY'를 추가하시면 AI 맞춤형 브리핑이 활성화됩니다!"
+        return {
+            "one_line": fallback_advice,
+            "briefing": "🔑 백엔드의 .env 파일과 Render에 'GEMINI_API_KEY'를 추가하시면 AI 맞춤형 브리핑이 활성화됩니다!"
+        }
     
     temp = current.get("temp", 20)
     feels_like = current.get("feels_like", 20)
     desc = current.get("description", "맑음")
     wind = current.get("wind_speed", 0)
     pm = air_quality.get("level", "보통") if air_quality else "보통"
+    max_pop = int(max((f.get("pop", 0) for f in forecast), default=0) * 100)
     
     prompt = (
-        f"현재 날씨는 {desc}, 기온은 {temp}도(체감 {feels_like}도), 풍속은 {wind}m/s, 미세먼지는 {pm} 수준입니다. "
-        "이 데이터를 바탕으로 기상캐스터처럼 다정하고 전문적인 날씨 브리핑을 3~4문장으로 작성해줘. "
-        "외출 시 옷차림 조언이나 주의사항을 포함하고, 마크다운(***) 없이 평문으로 쓰되 이모지를 적절히 섞어줘."
+        f"현재 날씨는 {desc}, 기온은 {temp}도(체감 {feels_like}도), 풍속은 {wind}m/s, 미세먼지는 {pm}, 강수확률은 {max_pop}%입니다.\n"
+        "아래 두 가지 항목을 작성해주세요. 마크다운(**, ## 등)은 절대 사용하지 말고 평문과 이모지만 사용하세요.\n\n"
+        "1. 한줄멘트: 현재 날씨 상황에 딱 맞는 센스 있고 다정한 추천 멘트 딱 한 문장 (예: 🌤️ 선선한 바람이 불어 산책하기 딱 좋은 하루예요!)\n"
+        "2. 상세브리핑: 기상캐스터처럼 다정하고 전문적인 날씨 브리핑 3~4문장 (외출 시 옷차림 조언이나 주의사항 포함)\n\n"
+        "반드시 아래 출력 형식을 정확히 지켜서 답변해주세요:\n"
+        "한줄: [여기에 한줄멘트 작성]\n"
+        "상세: [여기에 상세브리핑 작성]"
     )
     
     try:
-        # 💡 1. 내 API 키에서 텍스트 생성(generateContent)이 가능한 모델 목록을 직접 조회
         available_models = [
             m.name for m in genai.list_models() 
             if 'generateContent' in m.supported_generation_methods
         ]
         
         if not available_models:
-            return "❌ 현재 API 키로 사용 가능한 AI 모델이 없습니다."
+            return {"one_line": fallback_advice, "briefing": "❌ 사용 가능한 AI 모델이 없습니다."}
 
-        # 💡 2. 목록 중 가장 최신(3.0 또는 flash) 모델을 우선 선택 (없으면 첫 번째 가능 모델 선택)
         target_model = available_models[0]
         for m in available_models:
             if '3' in m and 'flash' in m:
@@ -65,14 +75,28 @@ def get_ai_briefing(current: dict, air_quality: dict) -> str:
             elif 'flash' in m:
                 target_model = m
 
-        # 💡 3. 구글 서버가 직접 확인해 준 100% 존재하는 모델명으로 호출 (404 에러 원천 차단)
         model = genai.GenerativeModel(target_model)
         response = model.generate_content(prompt)
         
         if response and response.text:
-            return response.text.strip()
+            text = response.text.strip()
+            one_line = fallback_advice
+            briefing = text
+            
+            # AI 응답에서 '한줄:'과 '상세:'를 분리하여 추출
+            if "한줄:" in text and "상세:" in text:
+                parts = text.split("상세:")
+                one_line = parts[0].replace("한줄:", "").strip()
+                briefing = parts[1].strip()
+            else:
+                lines = [line.strip() for line in text.split("\n") if line.strip()]
+                if len(lines) >= 2:
+                    one_line = lines[0].replace("한줄:", "").strip()
+                    briefing = " ".join(lines[1:]).replace("상세:", "").strip()
+                    
+            return {"one_line": one_line, "briefing": briefing}
         else:
-            return "AI 응답을 받아오지 못했습니다."
+            return {"one_line": fallback_advice, "briefing": "AI 응답을 받아오지 못했습니다."}
             
     except Exception as e:
-        return f"❌ AI 에러 발생: {str(e)}"
+        return {"one_line": fallback_advice, "briefing": f"❌ AI 에러 발생: {str(e)}"}
