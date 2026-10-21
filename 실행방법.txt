@@ -14,7 +14,10 @@ $env:PYTHONPATH="."
 
 uvicorn app.main:app --reload
 
-
+깃허브 저장
+git add .
+git commit -m "수정사항"
+git push origin main
 
 //아래 브라우저에서 실행
 http://127.0.0.1:8000/api/weather/summary?lat=37.5034&lon=126.7660

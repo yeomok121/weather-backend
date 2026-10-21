@@ -1,24 +1,20 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-import concurrent.futures
+import requests
+import bcrypt
 from app.advice import get_ai_contents
 from app.weather import get_current_weather, get_hourly_forecast, search_location, get_air_quality, get_weekly_forecast
+from app.database import get_conn
 from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  
+    allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# 💡 프론트엔드에서 데이터를 넘겨받기 위한 데이터 구조
-class AIDataRequest(BaseModel):
-    current: dict
-    forecast: list
-    air_quality: dict
 
 @app.get("/")
 def hello():
@@ -27,41 +23,24 @@ def hello():
 @app.get("/api/weather/summary")
 def summary(lat: float, lon: float):
     try:
-        # 💡 병렬 처리(ThreadPoolExecutor)로 4개의 API를 동시에 호출하여 수집 시간을 1/4로 단축!
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            f_current = executor.submit(get_current_weather, lat, lon)
-            f_hourly = executor.submit(get_hourly_forecast, lat, lon)
-            f_aqi = executor.submit(get_air_quality, lat, lon)
-            f_weekly = executor.submit(get_weekly_forecast, lat, lon)
-            
-            current = f_current.result()
-            forecast = f_hourly.result()
-            air_quality = f_aqi.result()
-            weekly = f_weekly.result()
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"서버 오류: {str(e)}")
-    
+        current = get_current_weather(lat, lon)
+        forecast = get_hourly_forecast(lat, lon)
+        air_quality = get_air_quality(lat, lon)
+        weekly = get_weekly_forecast(lat, lon)
+    except Exception:
+        raise HTTPException(status_code=502, detail="서버 오류")
+
+    # 💡 AI에서 한 줄 멘트와 상세 브리핑을 동시에 받아옴
+    ai_data = get_ai_contents(current, forecast, air_quality)
+
     return {
         "current": current,
         "hourly": forecast,
+        "advice": [ai_data["one_line"]],
+        "ai_briefing": ai_data["briefing"],
         "air_quality": air_quality,
         "weekly": weekly
     }
-
-# 💡 AI 데이터만 따로 요청받는 전용 엔드포인트 생성
-@app.post("/api/weather/ai")
-def ai_summary(data: AIDataRequest):
-    try:
-        ai_data = get_ai_contents(data.current, data.forecast, data.air_quality)
-        return {
-            "advice": [ai_data["one_line"]],
-            "ai_briefing": ai_data["briefing"]
-        }
-    except Exception:
-        return {
-            "advice": ["AI 멘트를 불러오지 못했습니다."],
-            "ai_briefing": "AI 날씨 전망을 불러오지 못했습니다."
-        }
 
 @app.get("/api/location/search")
 def location(q: str):
@@ -69,3 +48,49 @@ def location(q: str):
     if r is None:
         raise HTTPException(status_code=404, detail="지역을 찾을 수 없습니다")
     return r
+
+# ---------------- 회원가입 / 로그인 (MySQL) ----------------
+class SignUpRequest(BaseModel):
+    username: str
+    password: str
+    name: str
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+@app.post("/api/signup")
+def signup(req: SignUpRequest):
+    if len(req.username) < 4 or len(req.password) < 4 or not req.name.strip():
+        raise HTTPException(status_code=400, detail="입력값을 확인해주세요")
+
+    hashed = bcrypt.hashpw(req.password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id FROM users WHERE username = %s", (req.username,))
+            if cur.fetchone():
+                raise HTTPException(status_code=409, detail="이미 사용 중인 아이디입니다")
+            cur.execute(
+                "INSERT INTO users (username, password_hash, name) VALUES (%s, %s, %s)",
+                (req.username, hashed, req.name),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+    return {"message": "회원가입이 완료되었습니다"}
+
+@app.post("/api/login")
+def login(req: LoginRequest):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM users WHERE username = %s", (req.username,))
+            user = cur.fetchone()
+    finally:
+        conn.close()
+
+    if not user or not bcrypt.checkpw(req.password.encode("utf-8"), user["password_hash"].encode("utf-8")):
+        raise HTTPException(status_code=401, detail="아이디 또는 비밀번호가 올바르지 않습니다")
+    return {"message": "로그인 성공", "name": user["name"], "username": user["username"]}
