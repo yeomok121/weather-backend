@@ -212,23 +212,10 @@ def get_ai_contents(current: dict, forecast: list, air_quality: dict) -> dict:
     )
     
     try:
-        available_models = [
-            m.name for m in genai.list_models() 
-            if 'generateContent' in m.supported_generation_methods
-        ]
-        
-        if not available_models:
-            return {"one_line": fallback_one_line, "briefing": fallback_briefing}
-
-        target_model = available_models[0]
-        for m in available_models:
-            if '3' in m and 'flash' in m:
-                target_model = m
-                break
-            elif 'flash' in m:
-                target_model = m
-
+        # 💡 불필요한 모델 목록 조회 통신(1~2초) 삭제 후 빠르고 강력한 최신 모델 직접 지정
+        target_model = "gemini-1.5-flash"
         model = genai.GenerativeModel(target_model)
+        
         response = model.generate_content(prompt)
         
         if response and response.text:
