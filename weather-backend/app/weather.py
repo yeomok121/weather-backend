@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-KMA_API_KEY = "b82bdd286e9c433b217611deeca7d0a07c8479a8eef0bf54322e76a9db669c12"
+KMA_API_KEY = os.getenv("KMA_API_KEY")
 OWM_API_KEY = os.getenv("OPENWEATHER_API_KEY")
 BASE = "https://api.openweathermap.org/data/2.5"
 

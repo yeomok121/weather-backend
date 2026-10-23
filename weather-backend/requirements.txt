@@ -3,3 +3,6 @@ uvicorn
 requests
 python-dotenv
 google-generativeai
+pymysql
+bcrypt
+cryptography
