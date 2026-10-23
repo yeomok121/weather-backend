@@ -1,5 +1,6 @@
 import os
 import hmac
+import concurrent.futures
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Header
 import requests
@@ -9,6 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import bcrypt
 from app.database import get_conn
+
 load_dotenv()
 
 app = FastAPI()
@@ -27,21 +29,23 @@ def hello():
 @app.get("/api/weather/summary")
 def summary(lat: float, lon: float):
     try:
-        current = get_current_weather(lat, lon)
-        forecast = get_hourly_forecast(lat, lon)
-        air_quality = get_air_quality(lat, lon) 
-        weekly = get_weekly_forecast(lat, lon)
-    except Exception:
-        raise HTTPException(status_code=502, detail="서버 오류")
-    
-    # 💡 AI에서 한 줄 멘트와 상세 브리핑을 동시에 받아옴
-    ai_data = get_ai_contents(current, forecast, air_quality)
+        # 💡 4개의 날씨 API를 동시에 병렬 호출하여 대기 시간을 1/4로 단축!
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            f_current = executor.submit(get_current_weather, lat, lon)
+            f_hourly = executor.submit(get_hourly_forecast, lat, lon)
+            f_aqi = executor.submit(get_air_quality, lat, lon)
+            f_weekly = executor.submit(get_weekly_forecast, lat, lon)
+
+            current = f_current.result()
+            forecast = f_hourly.result()
+            air_quality = f_aqi.result()
+            weekly = f_weekly.result()
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"서버 오류: {str(e)}")
     
     return {
         "current": current,
         "hourly": forecast,
-        "advice": [ai_data["one_line"]],       # 메인 카드 한 줄 멘트 (AI 생성)
-        "ai_briefing": ai_data["briefing"],    # 하단 탭 상세 브리핑 (AI 생성)
         "air_quality": air_quality,
         "weekly": weekly
     }

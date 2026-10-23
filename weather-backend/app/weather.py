@@ -49,6 +49,54 @@ def get_kma_base_time():
     else: time_str = "2300"
     return date_str, time_str
 
+# 💡 어제 같은 시각의 기온을 가져오는 함수 (기상청 단기예보 + Open-Meteo 백업)
+def get_yesterday_temp(lat: float, lon: float, nx: int, ny: int) -> float | None:
+    kst = timezone(timedelta(hours=9))
+    now = datetime.now(kst)
+    yesterday = now - timedelta(days=1)
+    y_date_str = yesterday.strftime("%Y%m%d")
+    target_hour_str = now.strftime("%H00")
+
+    # 1차 시도: 기상청 어제 예보 데이터 조회
+    try:
+        url = "http://apis.data.go.kr/1360000/VilageFcstInfoService_2.0/getVilageFcst"
+        params = {
+            "serviceKey": KMA_API_KEY,
+            "pageNo": "1", "numOfRows": "300", "dataType": "JSON",
+            "base_date": y_date_str, "base_time": "0200", "nx": nx, "ny": ny
+        }
+        res = requests.get(url, params=params, timeout=3)
+        items = res.json().get("response", {}).get("body", {}).get("items", {}).get("item", [])
+        for item in items:
+            if item.get("fcstDate") == y_date_str and item.get("fcstTime") == target_hour_str and item.get("category") == "TMP":
+                return float(item.get("fcstValue"))
+    except Exception:
+        pass
+
+    # 2차 시도 (새벽 0~2시 등 기상청 어제 02시 기준을 벗어날 때): 무료 Open-Meteo 과거 날씨 조회
+    try:
+        om_url = "https://api.open-meteo.com/v1/forecast"
+        om_params = {
+            "latitude": lat, "longitude": lon,
+            "hourly": "temperature_2m",
+            "past_days": 1, "forecast_days": 1,
+            "timezone": "Asia/Seoul"
+        }
+        om_res = requests.get(om_url, params=om_params, timeout=3)
+        if om_res.status_code == 200:
+            hourly = om_res.json().get("hourly", {})
+            times = hourly.get("time", [])
+            temps = hourly.get("temperature_2m", [])
+            target_iso = yesterday.strftime("%Y-%m-%dT%H:00")
+            if target_iso in times:
+                idx = times.index(target_iso)
+                if idx < len(temps) and temps[idx] is not None:
+                    return float(temps[idx])
+    except Exception:
+        pass
+
+    return None
+
 def get_current_weather(lat: float, lon: float):
     nx, ny = get_nx_ny(lat, lon)
     base_date, base_time = get_kma_base_time()
@@ -130,6 +178,10 @@ def get_current_weather(lat: float, lon: float):
     except Exception:
         is_day = 6 <= now.hour < 18
 
+    # 💡 어제 기온과의 차이 계산
+    yesterday_temp = get_yesterday_temp(lat, lon, nx, ny)
+    temp_diff = round(temp - yesterday_temp) if yesterday_temp is not None else 0
+
     suffix = "d" if is_day else "n"
     desc = "맑음"; icon = f"01{suffix}"
     if pty in ["1", "4"]: desc = "비"; icon = f"09{suffix}"
@@ -139,10 +191,18 @@ def get_current_weather(lat: float, lon: float):
     elif sky == "4": desc = "흐림"; icon = f"04{suffix}"
 
     return {
-        "city": "기상청 실시간", "temp": round(temp), "feels_like": round(feels_like),
-        "temp_max": temp_max, "temp_min": temp_min, "humidity": int(humidity),
-        "wind_speed": wind_speed, "description": desc, "icon": icon,
-        "sunrise": sunrise_str, "sunset": sunset_str,
+        "city": "기상청 실시간",
+        "temp": round(temp),
+        "feels_like": round(feels_like),
+        "temp_max": temp_max,
+        "temp_min": temp_min,
+        "temp_diff": temp_diff,
+        "humidity": int(humidity),
+        "wind_speed": wind_speed,
+        "description": desc,
+        "icon": icon,
+        "sunrise": sunrise_str,
+        "sunset": sunset_str,
     }
 
 def get_hourly_forecast(lat: float, lon: float, count: int = 24):
@@ -204,7 +264,6 @@ def get_hourly_forecast(lat: float, lon: float, count: int = 24):
         })
     return result
 
-# 💡 안전장치(try-except 및 get)를 강화하여 서버 에러로 인한 주간 예보 증발 현상을 막았습니다!
 def get_weekly_forecast(lat: float, lon: float):
     try:
         res = requests.get(
