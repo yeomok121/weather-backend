@@ -626,4 +626,5 @@ def get_mountain_weather(mountain_name: str):
         "hourly": mountain_hourly,
         "air_quality": air_quality,
         "weekly": mountain_weekly
+        
     }
