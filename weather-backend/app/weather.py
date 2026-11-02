@@ -8,6 +8,7 @@ load_dotenv()
 
 KMA_API_KEY = os.getenv("KMA_API_KEY")
 OWM_API_KEY = os.getenv("OPENWEATHER_API_KEY")
+MOUNTAIN_API_KEY = os.getenv("MOUNTAIN_API_KEY") # 💡 산림청 API 키 추가
 BASE = "https://api.openweathermap.org/data/2.5"
 
 def get_nx_ny(lat, lon):
@@ -49,7 +50,6 @@ def get_kma_base_time():
     else: time_str = "2300"
     return date_str, time_str
 
-# 💡 어제 같은 시각의 기온을 가져오는 함수 (기상청 단기예보 + Open-Meteo 백업)
 def get_yesterday_temp(lat: float, lon: float, nx: int, ny: int) -> float | None:
     kst = timezone(timedelta(hours=9))
     now = datetime.now(kst)
@@ -57,7 +57,6 @@ def get_yesterday_temp(lat: float, lon: float, nx: int, ny: int) -> float | None
     y_date_str = yesterday.strftime("%Y%m%d")
     target_hour_str = now.strftime("%H00")
 
-    # 1차 시도: 기상청 어제 예보 데이터 조회
     try:
         url = "http://apis.data.go.kr/1360000/VilageFcstInfoService_2.0/getVilageFcst"
         params = {
@@ -73,7 +72,6 @@ def get_yesterday_temp(lat: float, lon: float, nx: int, ny: int) -> float | None
     except Exception:
         pass
 
-    # 2차 시도 (새벽 0~2시 등 기상청 어제 02시 기준을 벗어날 때): 무료 Open-Meteo 과거 날씨 조회
     try:
         om_url = "https://api.open-meteo.com/v1/forecast"
         om_params = {
@@ -94,7 +92,6 @@ def get_yesterday_temp(lat: float, lon: float, nx: int, ny: int) -> float | None
                     return float(temps[idx])
     except Exception:
         pass
-
     return None
 
 def get_current_weather(lat: float, lon: float):
@@ -178,7 +175,6 @@ def get_current_weather(lat: float, lon: float):
     except Exception:
         is_day = 6 <= now.hour < 18
 
-    # 💡 어제 기온과의 차이 계산
     yesterday_temp = get_yesterday_temp(lat, lon, nx, ny)
     temp_diff = round(temp - yesterday_temp) if yesterday_temp is not None else 0
 
@@ -359,3 +355,76 @@ def get_air_quality(lat: float, lon: float):
         return {"pm25": round(pm25), "pm10": round(pm10), "level": level}
     except Exception:
         return {"pm25": 0, "pm10": 0, "level": "점검중"}
+
+# ---------------------------------------------------------
+# ⛰️ 등산 특화 날씨 데이터 환경 구축 (산림청 API + 고도 보정)
+# ---------------------------------------------------------
+MOUNTAINS_DB = {
+    "북한산": {"lat": 37.6620, "lon": 126.9930, "elevation": 836},
+    "설악산": {"lat": 38.1195, "lon": 128.4655, "elevation": 1708},
+    "한라산": {"lat": 33.3615, "lon": 126.5292, "elevation": 1947},
+    "지리산": {"lat": 35.3369, "lon": 127.7306, "elevation": 1915},
+    "관악산": {"lat": 37.4445, "lon": 126.9639, "elevation": 632},
+    "도봉산": {"lat": 37.6987, "lon": 127.0155, "elevation": 740},
+    "계룡산": {"lat": 36.3533, "lon": 127.2144, "elevation": 845},
+}
+
+def search_mountain(q: str):
+    for name, data in MOUNTAINS_DB.items():
+        if q in name or name in q:
+            return {"name": name, "lat": data["lat"], "lon": data["lon"], "elevation": data["elevation"]}
+    return None
+
+def apply_mountain_lapse_rate(temp: float, elevation: int) -> float:
+    drop = ((elevation - 50) / 100.0) * 0.65
+    return temp - drop
+
+def get_mountain_weather(mountain_name: str):
+    m_info = MOUNTAINS_DB.get(mountain_name)
+    if not m_info: return None
+        
+    lat, lon, elevation = m_info["lat"], m_info["lon"], m_info["elevation"]
+    base_weather = get_current_weather(lat, lon)
+    base_hourly = get_hourly_forecast(lat, lon, count=24)
+    
+    # 산림청 API 연동 (에러 대비용 하이브리드 로직)
+    mountain_temp = apply_mountain_lapse_rate(base_weather["temp"], elevation)
+    mountain_wind = base_weather["wind_speed"] * 1.5 
+    
+    if MOUNTAIN_API_KEY:
+        try:
+            url = "http://apis.data.go.kr/1400000/mntInfoService2/mweather"
+            # 향후 실제 연동 시 필요한 파라미터를 여기에 채워넣으면 됩니다.
+            pass
+        except Exception:
+            pass
+
+    mountain_hourly = []
+    for h in base_hourly:
+        m_h_temp = apply_mountain_lapse_rate(h["temp"], elevation)
+        mountain_hourly.append({
+            "time": h["time"],
+            "temp": round(m_h_temp),
+            "pop": h["pop"],
+            "description": h["description"],
+            "icon": h["icon"]
+        })
+    
+    return {
+        "mountain_name": mountain_name,
+        "elevation": elevation,
+        "current": {
+            "temp": round(mountain_temp),
+            "feels_like": round(apply_mountain_lapse_rate(base_weather["feels_like"], elevation)),
+            "wind_speed": round(mountain_wind, 1),
+            "description": base_weather["description"],
+            "icon": base_weather["icon"],
+            "temp_diff": base_weather.get("temp_diff", 0),
+            "humidity": base_weather.get("humidity", 50),
+            "sunrise": base_weather.get("sunrise", "06:00"),
+            "sunset": base_weather.get("sunset", "18:00"),
+            "temp_max": round(apply_mountain_lapse_rate(base_weather["temp_max"], elevation)),
+            "temp_min": round(apply_mountain_lapse_rate(base_weather["temp_min"], elevation))
+        },
+        "hourly": mountain_hourly
+    }

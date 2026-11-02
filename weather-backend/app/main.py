@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Header
 import requests
 from app.advice import get_ai_contents
-from app.weather import get_current_weather, get_hourly_forecast, search_location, get_air_quality, get_weekly_forecast
+from app.weather import get_current_weather, get_hourly_forecast, search_location, get_air_quality, get_weekly_forecast, search_mountain, get_mountain_weather
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import bcrypt
@@ -29,7 +29,6 @@ def hello():
 @app.get("/api/weather/summary")
 def summary(lat: float, lon: float):
     try:
-        # 💡 4개의 날씨 API를 동시에 병렬 호출하여 대기 시간을 1/4로 단축!
         with concurrent.futures.ThreadPoolExecutor() as executor:
             f_current = executor.submit(get_current_weather, lat, lon)
             f_hourly = executor.submit(get_hourly_forecast, lat, lon)
@@ -56,6 +55,24 @@ def location(q: str):
     if r is None:
         raise HTTPException(status_code=404, detail="지역을 찾을 수 없습니다")
     return r
+
+# ---------------------------------------------------------
+# ⛰️ 산악 기상 전용 API
+# ---------------------------------------------------------
+@app.get("/api/mountain/search")
+def api_search_mountain(q: str):
+    result = search_mountain(q)
+    if not result:
+        raise HTTPException(status_code=404, detail="해당 산을 찾을 수 없습니다.")
+    return result
+
+@app.get("/api/mountain/summary")
+def api_mountain_summary(name: str):
+    result = get_mountain_weather(name)
+    if not result:
+        raise HTTPException(status_code=404, detail="산 정보를 불러올 수 없습니다.")
+    return result
+
 
 class SignUpRequest(BaseModel):
     username: str
@@ -102,7 +119,6 @@ def login(req: LoginRequest):
         raise HTTPException(status_code=401, detail="아이디 또는 비밀번호가 올바르지 않습니다")
     return {"message": "로그인 성공", "name": user["name"], "username": user["username"]}
 
-# ---------------- AI 멘트 (프론트가 따로 호출) ----------------
 class AIRequest(BaseModel):
     current: dict
     forecast: list
@@ -113,7 +129,6 @@ def weather_ai(req: AIRequest):
     ai_data = get_ai_contents(req.current, req.forecast, req.air_quality or {})
     return {"advice": [ai_data["one_line"]], "ai_briefing": ai_data["briefing"]}
 
-# ---------------- 공통 도우미 ----------------
 def _hash_pw(password: str) -> str:
     raw = password.encode("utf-8")
     if len(raw) > 72:
@@ -127,7 +142,6 @@ def _verify_user(cur, username: str, password: str):
         raise HTTPException(status_code=401, detail="비밀번호가 올바르지 않습니다")
     return user
 
-# ---------------- 내 정보 수정 / 회원 탈퇴 ----------------
 class UpdateUserRequest(BaseModel):
     username: str
     current_password: str
@@ -172,7 +186,6 @@ def delete_user(req: DeleteUserRequest):
         conn.close()
     return {"message": "탈퇴되었습니다"}
 
-# ---------------- 비밀번호 찾기 (아이디 + 이름 확인 후 재설정) ----------------
 class ResetPasswordRequest(BaseModel):
     username: str
     name: str
@@ -197,7 +210,6 @@ def reset_password(req: ResetPasswordRequest):
         conn.close()
     return {"message": "비밀번호가 변경되었습니다"}
 
-# ---------------- 관리자 API (헤더 x-admin-password 필요) ----------------
 def require_admin(x_admin_password: str | None):
     expected = os.getenv("ADMIN_PASSWORD")
     if (not expected or not x_admin_password
