@@ -283,7 +283,6 @@ def get_weekly_forecast(lat: float, lon: float):
             weather_list = item.get("weather", [])
             icon = weather_list[0].get("icon", "01d") if weather_list else "01d"
             
-            # 💡 미래 날짜의 습도와 풍속 데이터 추가 수집
             wind_speed = item.get("wind", {}).get("speed", 0)
             humidity = main_data.get("humidity", 50)
             
@@ -319,7 +318,6 @@ def get_weekly_forecast(lat: float, lon: float):
             if not temps: temps = [20]
             if not pops: pops = [0]
             
-            # 💡 미래 날짜 평균 풍속 및 습도 산출
             avg_wind = sum(winds) / len(winds) if winds else 0
             avg_hum = sum(hums) / len(hums) if hums else 50
             
@@ -373,108 +371,128 @@ def get_air_quality(lat: float, lon: float):
         return {"pm25": 0, "pm10": 0, "level": "점검중"}
 
 # ---------------------------------------------------------
-# ⛰️ 한국의 20대 명산 데이터베이스 및 산악 기상 엔진
+# ⛰️ 한국의 20대 명산 데이터베이스 및 산악 기상 엔진 (CCTV URL 포함)
 # ---------------------------------------------------------
 MOUNTAINS_DB = {
     "북한산": {
         "lat": 37.6620, "lon": 126.9930, "elevation": 836, "peak": "백운대",
         "terrain": "화강암 암릉", "difficulty": "중상", "region": "서울/경기",
-        "course_tip": "백운대 정상 부근 화강암 바위가 가파르고 미끄러우니 접지력이 좋은 등산화와 장갑을 꼭 착용하세요."
+        "course_tip": "백운대 정상 부근 화강암 바위가 가파르고 미끄러우니 접지력이 좋은 등산화와 장갑을 꼭 착용하세요.",
+        "cctv_url": "https://www.knps.or.kr/portal/main/contents.do?menuNo=8000159"
     },
     "설악산": {
         "lat": 38.1195, "lon": 128.4655, "elevation": 1708, "peak": "대청봉",
         "terrain": "고산 암릉·돌계단", "difficulty": "상", "region": "강원 인제/속초",
-        "course_tip": "오색~대청봉 코스는 경사가 급하고 정상 능선에 강한 칼바람이 불어 사계절 방풍 재킷이 필수입니다."
+        "course_tip": "오색~대청봉 코스는 경사가 급하고 정상 능선에 강한 칼바람이 불어 사계절 방풍 재킷이 필수입니다.",
+        "cctv_url": "https://www.knps.or.kr/portal/main/contents.do?menuNo=8000159"
     },
     "한라산": {
         "lat": 33.3615, "lon": 126.5292, "elevation": 1947, "peak": "백록담",
         "terrain": "고산 화산지형·현무암", "difficulty": "상", "region": "제주",
-        "course_tip": "성판악·관음사 코스는 사전 탐방 예약이 필수이며, 정상 백록담은 평지보다 12°C 이상 낮고 기상 변화가 급격합니다."
+        "course_tip": "성판악·관음사 코스는 사전 탐방 예약이 필수이며, 정상 백록담은 평지보다 12°C 이상 낮고 기상 변화가 급격합니다.",
+        "cctv_url": "https://www.jeju.go.kr/hallasan/info/cctv.htm"
     },
     "지리산": {
         "lat": 35.3369, "lon": 127.7306, "elevation": 1915, "peak": "천왕봉",
         "terrain": "고산 능선·너덜길", "difficulty": "상", "region": "경남/전남/전북",
-        "course_tip": "중산리~천왕봉 코스는 장거리 산행이므로 일몰 시간과 체력을 고려해 헤드랜턴과 행동식을 충분히 준비하세요."
+        "course_tip": "중산리~천왕봉 코스는 장거리 산행이므로 일몰 시간과 체력을 고려해 헤드랜턴과 행동식을 충분히 준비하세요.",
+        "cctv_url": "https://www.knps.or.kr/portal/main/contents.do?menuNo=8000159"
     },
     "덕유산": {
         "lat": 35.8596, "lon": 127.7468, "elevation": 1614, "peak": "향적봉",
         "terrain": "아고산대 능선·주목군락", "difficulty": "중하", "region": "전북 무주",
-        "course_tip": "무주리조트 곤돌라로 설천봉까지 쉽게 오를 수 있으나, 향적봉 정상 능선은 습도가 높고 상고대·강풍이 잦아 보온에 유의하세요."
+        "course_tip": "무주리조트 곤돌라로 설천봉까지 쉽게 오를 수 있으나, 향적봉 정상 능선은 습도가 높고 상고대·강풍이 잦아 보온에 유의하세요.",
+        "cctv_url": "https://www.knps.or.kr/portal/main/contents.do?menuNo=8000159"
     },
     "소백산": {
         "lat": 36.9575, "lon": 128.4847, "elevation": 1439, "peak": "비로봉",
         "terrain": "초원 능선(육산)", "difficulty": "중", "region": "충북 단양/경북 영주",
-        "course_tip": "나무가 없는 탁 트인 능선이라 바람을 막아줄 지형물이 없습니다. 체감온도가 급락하니 방풍·방한모를 꼭 챙기세요."
+        "course_tip": "나무가 없는 탁 트인 능선이라 바람을 막아줄 지형물이 없습니다. 체감온도가 급락하니 방풍·방한모를 꼭 챙기세요.",
+        "cctv_url": "https://www.knps.or.kr/portal/main/contents.do?menuNo=8000159"
     },
     "태백산": {
         "lat": 37.0964, "lon": 128.9163, "elevation": 1567, "peak": "장군봉(천제단)",
         "terrain": "완만한 육산·주목군락", "difficulty": "중하", "region": "강원 태백",
-        "course_tip": "유일사·당골 코스는 해발고도에 비해 경사가 완만해 초보자도 오르기 좋으며, 겨울철 눈꽃과 일출 조망이 뛰어납니다."
+        "course_tip": "유일사·당골 코스는 해발고도에 비해 경사가 완만해 초보자도 오르기 좋으며, 겨울철 눈꽃과 일출 조망이 뛰어납니다.",
+        "cctv_url": "https://www.knps.or.kr/portal/main/contents.do?menuNo=8000159"
     },
     "오대산": {
         "lat": 37.7946, "lon": 128.5432, "elevation": 1563, "peak": "비로봉",
         "terrain": "부드러운 흙길(육산)", "difficulty": "중", "region": "강원 평창/홍천",
-        "course_tip": "상원사~비로봉 구간은 흙길과 계단이 잘 정비되어 있으나 정상 직전 오르막이 가파르니 등산 스틱을 활용하세요."
+        "course_tip": "상원사~비로봉 구간은 흙길과 계단이 잘 정비되어 있으나 정상 직전 오르막이 가파르니 등산 스틱을 활용하세요.",
+        "cctv_url": "https://www.knps.or.kr/portal/main/contents.do?menuNo=8000159"
     },
     "치악산": {
         "lat": 37.3652, "lon": 128.0558, "elevation": 1288, "peak": "비로봉",
         "terrain": "급경사 계단·너덜길", "difficulty": "상", "region": "강원 원주",
-        "course_tip": "구룡사~사다리병창 코스는 악명 높은 급경사 철계단과 돌길이 이어지므로 무릎 보호대와 스틱이 필수입니다."
+        "course_tip": "구룡사~사다리병창 코스는 악명 높은 급경사 철계단과 돌길이 이어지므로 무릎 보호대와 스틱이 필수입니다.",
+        "cctv_url": "https://www.knps.or.kr/portal/main/contents.do?menuNo=8000159"
     },
     "월악산": {
         "lat": 36.8856, "lon": 128.1058, "elevation": 1097, "peak": "영봉",
         "terrain": "험준한 암릉·철계단", "difficulty": "상", "region": "충북 제천",
-        "course_tip": "영봉 직전 수백 개의 가파른 철계단 구간이 있으며 충주호에서 불어오는 골바람이 강해 미끄럼과 강풍에 주의해야 합니다."
+        "course_tip": "영봉 직전 수백 개의 가파른 철계단 구간이 있으며 충주호에서 불어오는 골바람이 강해 미끄럼과 강풍에 주의해야 합니다.",
+        "cctv_url": "https://www.knps.or.kr/portal/main/contents.do?menuNo=8000159"
     },
     "속리산": {
         "lat": 36.5430, "lon": 127.8712, "elevation": 1058, "peak": "천왕봉(문장대)",
         "terrain": "기암괴석·암릉 능선", "difficulty": "중", "region": "충북 보은/경북 상주",
-        "course_tip": "문장대 바위 정상은 사방이 트여 조망이 압도적이지만 난간 구간에서 강풍이 불 때 안전에 각별히 유의하세요."
+        "course_tip": "문장대 바위 정상은 사방이 트여 조망이 압도적이지만 난간 구간에서 강풍이 불 때 안전에 각별히 유의하세요.",
+        "cctv_url": "https://www.knps.or.kr/portal/main/contents.do?menuNo=8000159"
     },
     "가야산": {
         "lat": 35.8225, "lon": 128.1189, "elevation": 1430, "peak": "상왕봉(우두봉)",
         "terrain": "뾰족한 암봉·돌계단", "difficulty": "중상", "region": "경남 합천/경북 성주",
-        "course_tip": "해인사·백운동 코스 모두 정상 부근 암릉 구간이 험준하므로 비나 눈이 온 뒤에는 바위 미끄럼을 특히 조심하세요."
+        "course_tip": "해인사·백운동 코스 모두 정상 부근 암릉 구간이 험준하므로 비나 눈이 온 뒤에는 바위 미끄럼을 특히 조심하세요.",
+        "cctv_url": "https://www.knps.or.kr/portal/main/contents.do?menuNo=8000159"
     },
     "계룡산": {
         "lat": 36.3533, "lon": 127.2144, "elevation": 845, "peak": "관음봉",
         "terrain": "암릉 능선·가파른 계단", "difficulty": "중상", "region": "충남 공주/계룡",
-        "course_tip": "동학사~남매탑~관음봉 코스는 해발고도는 낮아도 자연성릉 바위 능선과 고깔바위 계단이 가팔라 체력 소모가 큽니다."
+        "course_tip": "동학사~남매탑~관음봉 코스는 해발고도는 낮아도 자연성릉 바위 능선과 고깔바위 계단이 가팔라 체력 소모가 큽니다.",
+        "cctv_url": "https://www.knps.or.kr/portal/main/contents.do?menuNo=8000159"
     },
     "무등산": {
         "lat": 35.1342, "lon": 126.9886, "elevation": 1187, "peak": "서석대·입석대",
         "terrain": "주상절리대·완만한 능선", "difficulty": "중", "region": "광주/전남 화순",
-        "course_tip": "증심사·원효사 코스는 완만하나 서석대 주상절리 능선 구간은 그늘이 적고 바람이 강해 자외선 차단과 방풍 준비가 필요합니다."
+        "course_tip": "증심사·원효사 코스는 완만하나 서석대 주상절리 능선 구간은 그늘이 적고 바람이 강해 자외선 차단과 방풍 준비가 필요합니다.",
+        "cctv_url": "https://www.knps.or.kr/portal/main/contents.do?menuNo=8000159"
     },
     "주왕산": {
         "lat": 36.3894, "lon": 129.1628, "elevation": 721, "peak": "주봉",
         "terrain": "기암절벽 협곡·흙길", "difficulty": "하", "region": "경북 청송",
-        "course_tip": "대전사~주봉~용추폭포 코스는 험한 구간이 적어 초보자 산행에 적합하며, 협곡 내 습도가 높아 아침 물안개가 자주 낍니다."
+        "course_tip": "대전사~주봉~용추폭포 코스는 험한 구간이 적어 초보자 산행에 적합하며, 협곡 내 습도가 높아 아침 물안개가 자주 낍니다.",
+        "cctv_url": "https://www.knps.or.kr/portal/main/contents.do?menuNo=8000159"
     },
     "도봉산": {
         "lat": 37.6987, "lon": 127.0155, "elevation": 740, "peak": "자운봉(신선대)",
         "terrain": "거대 화강암 암봉", "difficulty": "중상", "region": "서울 도봉/경기 양주",
-        "course_tip": "신선대 정상 오름길은 가파른 바위와 쇠난간을 잡고 올라야 하므로 반장갑과 릿지화(등산화) 착용을 강력히 권장합니다."
+        "course_tip": "신선대 정상 오름길은 가파른 바위와 쇠난간을 잡고 올라야 하므로 반장갑과 릿지화(등산화) 착용을 강력히 권장합니다.",
+        "cctv_url": "https://www.knps.or.kr/portal/main/contents.do?menuNo=8000159"
     },
     "관악산": {
         "lat": 37.4445, "lon": 126.9639, "elevation": 632, "peak": "연주대",
         "terrain": "바위 능선·돌계단", "difficulty": "중", "region": "서울 관악/경기 과천",
-        "course_tip": "사당·서울대 코스는 바위가 많고 노출된 암릉 구간이 이어져 비나 서리가 내린 날에는 미끄럼 사고에 주의해야 합니다."
+        "course_tip": "사당·서울대 코스는 바위가 많고 노출된 암릉 구간이 이어져 비나 서리가 내린 날에는 미끄럼 사고에 주의해야 합니다.",
+        "cctv_url": "https://www.youtube.com/results?search_query=%EA%B4%80%EC%95%85%EC%82%B0+%EC%97%B0%EC%A3%BC%EB%8C%80+%EC%8B%A4%EC%8B%9C%EA%B0%84"
     },
     "대둔산": {
         "lat": 36.1247, "lon": 127.3211, "elevation": 878, "peak": "마천대",
         "terrain": "기암절벽·구름다리·철계단", "difficulty": "중", "region": "충남 논산/전북 완주",
-        "course_tip": "금강구름다리와 삼선계단은 경사가 매우 가파르고 일방통행이므로 고소공포증이나 강풍 시 우회 등산로를 이용하세요."
+        "course_tip": "금강구름다리와 삼선계단은 경사가 매우 가파르고 일방통행이므로 고소공포증이나 강풍 시 우회 등산로를 이용하세요.",
+        "cctv_url": "https://www.youtube.com/results?search_query=%EB%8C%80%EB%91%94%EC%82%B0+%EB%A7%88%EC%B2%9C%EB%8C%80+%EC%8B%A4%EC%8B%9C%EA%B0%84"
     },
     "내장산": {
         "lat": 35.4783, "lon": 126.8892, "elevation": 763, "peak": "신선봉",
         "terrain": "단풍 계곡·암릉 능선", "difficulty": "중", "region": "전북 정읍/순창",
-        "course_tip": "일주문~내장사 구간은 평탄하지만 신선봉 정상으로 오르는 능선은 경사가 급하고 습기가 많아 미끄럼에 유의하세요."
+        "course_tip": "일주문~내장사 구간은 평탄하지만 신선봉 정상으로 오르는 능선은 경사가 급하고 습기가 많아 미끄럼에 유의하세요.",
+        "cctv_url": "https://www.knps.or.kr/portal/main/contents.do?menuNo=8000159"
     },
     "마이산": {
         "lat": 35.7611, "lon": 127.4122, "elevation": 686, "peak": "암마이봉",
         "terrain": "역암 바위·데크 계단", "difficulty": "중하", "region": "전북 진안",
-        "course_tip": "탑사~암마이봉 구간은 바위 경사가 가파르며, 겨울철 결빙 시 암마이봉 정상부가 통제될 수 있으니 노면 상태를 꼭 확인하세요."
+        "course_tip": "탑사~암마이봉 구간은 바위 경사가 가파르며, 겨울철 결빙 시 암마이봉 정상부가 통제될 수 있으니 노면 상태를 꼭 확인하세요.",
+        "cctv_url": "https://www.youtube.com/results?search_query=%EB%A7%88%EC%9D%B4%EC%82%B0+%EC%8B%A4%EC%8B%9C%EA%B0%84"
     }
 }
 
@@ -491,7 +509,8 @@ def search_mountain(q: str):
                 "terrain": data["terrain"],
                 "difficulty": data["difficulty"],
                 "region": data["region"],
-                "course_tip": data["course_tip"]
+                "course_tip": data["course_tip"],
+                "cctv_url": data.get("cctv_url", "https://www.knps.or.kr/portal/main/contents.do?menuNo=8000159")
             }
     return None
 
@@ -576,7 +595,6 @@ def get_mountain_weather(mountain_name: str):
             "description": h["description"], "icon": h["icon"]
         })
 
-    # 💡 미래 날짜 산악 계획을 위해 주간 예보에도 산악 특화 풍속/습도 등을 정확히 계산하여 삽입
     mountain_weekly = []
     for w in base_weekly:
         w_temp_max = round(apply_mountain_lapse_rate(w["temp_max"], elevation))
@@ -602,6 +620,7 @@ def get_mountain_weather(mountain_name: str):
             "difficulty": m_info["difficulty"],
             "region": m_info["region"],
             "course_tip": m_info["course_tip"],
+            "cctv_url": m_info.get("cctv_url", "https://www.knps.or.kr/portal/main/contents.do?menuNo=8000159"),
             "base_temp": base_temp,
             "summit_drop": summit_drop,
             "safe_descent_time": safe_descent_time
@@ -626,5 +645,4 @@ def get_mountain_weather(mountain_name: str):
         "hourly": mountain_hourly,
         "air_quality": air_quality,
         "weekly": mountain_weekly
-        
     }
