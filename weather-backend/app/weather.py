@@ -283,11 +283,17 @@ def get_weekly_forecast(lat: float, lon: float):
             weather_list = item.get("weather", [])
             icon = weather_list[0].get("icon", "01d") if weather_list else "01d"
             
+            # 💡 미래 날짜의 습도와 풍속 데이터 추가 수집
+            wind_speed = item.get("wind", {}).get("speed", 0)
+            humidity = main_data.get("humidity", 50)
+            
             if date_str not in daily_data:
-                daily_data[date_str] = {"temps": [], "pops": [], "icons": []}
+                daily_data[date_str] = {"temps": [], "pops": [], "icons": [], "winds": [], "hums": []}
             daily_data[date_str]["temps"].append(temp)
             daily_data[date_str]["pops"].append(pop)
             daily_data[date_str]["icons"].append(icon)
+            daily_data[date_str]["winds"].append(wind_speed)
+            daily_data[date_str]["hums"].append(humidity)
         
         result = []
         kst = timezone(timedelta(hours=9))
@@ -307,18 +313,27 @@ def get_weekly_forecast(lat: float, lon: float):
             
             temps = d_info["temps"]
             pops = d_info["pops"]
+            winds = d_info["winds"]
+            hums = d_info["hums"]
             
             if not temps: temps = [20]
             if not pops: pops = [0]
             
+            # 💡 미래 날짜 평균 풍속 및 습도 산출
+            avg_wind = sum(winds) / len(winds) if winds else 0
+            avg_hum = sum(hums) / len(hums) if hums else 50
+            
             result.append({
                 "date": f"{d_obj.month}/{d_obj.day}",
+                "full_date": d_str,
                 "day": weekday,
                 "isToday": d_str == today_str,
                 "temp_max": round(max(temps)),
                 "temp_min": round(min(temps)),
                 "pop": round(max(pops) * 100),
-                "icon": rep_icon
+                "icon": rep_icon,
+                "wind_speed": round(avg_wind, 1),
+                "humidity": round(avg_hum)
             })
         return result[:5]
     except Exception:
@@ -481,12 +496,10 @@ def search_mountain(q: str):
     return None
 
 def apply_mountain_lapse_rate(temp: float, elevation: int) -> float:
-    # 해발 100m 상승 시 기온 약 0.65°C 하강 (평지 50m 기준)
     drop = ((max(50, elevation) - 50) / 100.0) * 0.65
     return temp - drop
 
 def calculate_safe_descent_time(sunset_str: str) -> str:
-    """일몰 2시간 전을 안전 하산 마감 시각으로 계산합니다."""
     try:
         h, m = map(int, sunset_str.split(":"))
         total_min = max(0, (h * 60 + m) - 120)
@@ -495,23 +508,14 @@ def calculate_safe_descent_time(sunset_str: str) -> str:
         return "15:30"
 
 def fetch_forest_service_api(mountain_name: str) -> dict | None:
-    """산림청 산악기상정보 API 호출 (응답 지연이나 미등록 키 에러 시 즉시 패스)"""
-    if not MOUNTAIN_API_KEY:
-        return None
+    if not MOUNTAIN_API_KEY: return None
     try:
         url = "http://apis.data.go.kr/1400377/mtweather/mountListSearch"
-        params = {
-            "serviceKey": MOUNTAIN_API_KEY,
-            "pageNo": "1",
-            "numOfRows": "10",
-            "_type": "json",
-            "searchWrd": mountain_name
-        }
+        params = { "serviceKey": MOUNTAIN_API_KEY, "pageNo": "1", "numOfRows": "10", "_type": "json", "searchWrd": mountain_name }
         res = requests.get(url, params=params, timeout=2.5)
         if res.status_code == 200:
             items = res.json().get("response", {}).get("body", {}).get("items", {}).get("item", [])
-            if isinstance(items, dict):
-                items = [items]
+            if isinstance(items, dict): items = [items]
             if items and len(items) > 0:
                 first = items[0]
                 obs_temp = first.get("tm2m") or first.get("temp")
@@ -523,22 +527,19 @@ def fetch_forest_service_api(mountain_name: str) -> dict | None:
                         "wind_speed": float(obs_wind) if obs_wind is not None else None,
                         "humidity": int(float(obs_hum)) if obs_hum is not None else None
                     }
-    except Exception:
-        pass
+    except Exception: pass
     return None
 
 def get_mountain_weather(mountain_name: str):
     m_info = MOUNTAINS_DB.get(mountain_name)
     if not m_info:
         found = search_mountain(mountain_name)
-        if not found:
-            return None
+        if not found: return None
         mountain_name = found["name"]
         m_info = MOUNTAINS_DB[mountain_name]
 
     lat, lon, elevation = m_info["lat"], m_info["lon"], m_info["elevation"]
 
-    # 💡 4대 기상 데이터 + 산림청 API를 병렬(ThreadPoolExecutor)로 동시에 수집!
     with concurrent.futures.ThreadPoolExecutor() as executor:
         f_base = executor.submit(get_current_weather, lat, lon)
         f_hourly = executor.submit(get_hourly_forecast, lat, lon, 24)
@@ -557,40 +558,37 @@ def get_mountain_weather(mountain_name: str):
     summit_wind = round(max(1.2, base_weather["wind_speed"] * 1.6 + (elevation / 1000.0)), 1)
     summit_humidity = min(100, int(base_weather.get("humidity", 50) + 8))
 
-    # 산림청 실측값이 있으면 우선 반영
     if forest_obs:
         summit_temp = round(forest_obs["temp"])
-        if forest_obs.get("wind_speed") is not None:
-            summit_wind = round(forest_obs["wind_speed"], 1)
-        if forest_obs.get("humidity") is not None:
-            summit_humidity = forest_obs["humidity"]
+        if forest_obs.get("wind_speed") is not None: summit_wind = round(forest_obs["wind_speed"], 1)
+        if forest_obs.get("humidity") is not None: summit_humidity = forest_obs["humidity"]
 
-    # 산 정상 칼바람 체감온도 계산 (풍속에 따른 체감 하락 반영)
     wind_chill_drop = round(summit_wind * 0.7) if summit_temp <= 15 else 0
     summit_feels_like = summit_temp - wind_chill_drop
     summit_drop = max(1, base_temp - summit_temp)
-
     safe_descent_time = calculate_safe_descent_time(base_weather.get("sunset", "17:30"))
 
-    # 시간대별 예보 고도 보정
     mountain_hourly = []
     for h in base_hourly:
         m_h_temp = apply_mountain_lapse_rate(h["temp"], elevation)
         mountain_hourly.append({
-            "time": h["time"],
-            "temp": round(m_h_temp),
-            "pop": h["pop"],
-            "description": h["description"],
-            "icon": h["icon"]
+            "time": h["time"], "temp": round(m_h_temp), "pop": h["pop"],
+            "description": h["description"], "icon": h["icon"]
         })
 
-    # 💡 주간 예보(5일) 고도 보정 (우측 하단 주간 예보 누락 완벽 해결!)
+    # 💡 미래 날짜 산악 계획을 위해 주간 예보에도 산악 특화 풍속/습도 등을 정확히 계산하여 삽입
     mountain_weekly = []
     for w in base_weekly:
+        w_temp_max = round(apply_mountain_lapse_rate(w["temp_max"], elevation))
+        w_temp_min = round(apply_mountain_lapse_rate(w["temp_min"], elevation))
+        w_wind = round(max(1.2, w["wind_speed"] * 1.6 + (elevation / 1000.0)), 1)
+        w_hum = min(100, int(w["humidity"] + 8))
         mountain_weekly.append({
             **w,
-            "temp_max": round(apply_mountain_lapse_rate(w["temp_max"], elevation)),
-            "temp_min": round(apply_mountain_lapse_rate(w["temp_min"], elevation))
+            "temp_max": w_temp_max,
+            "temp_min": w_temp_min,
+            "wind_speed": w_wind,
+            "humidity": w_hum
         })
 
     return {
