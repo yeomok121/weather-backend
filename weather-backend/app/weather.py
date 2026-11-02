@@ -180,12 +180,20 @@ def get_current_weather(lat: float, lon: float):
     temp_diff = round(temp - yesterday_temp) if yesterday_temp is not None else 0
 
     suffix = "d" if is_day else "n"
+    
+    # 💡 [핵심 수정] 기온이 0도 이하인데 비나 눈이 온다면 무조건 눈(13)으로 표출
     desc = "맑음"; icon = f"01{suffix}"
-    if pty in ["1", "4"]: desc = "비"; icon = f"09{suffix}"
-    elif pty == "3": desc = "눈"; icon = f"13{suffix}"
-    elif pty == "2": desc = "비/눈"; icon = f"13{suffix}"
-    elif sky == "3": desc = "구름많음"; icon = f"03{suffix}"
-    elif sky == "4": desc = "흐림"; icon = f"04{suffix}"
+    if pty in ["1", "4"] or (pty == "2" and temp > 0): 
+        if temp <= 0:
+            desc = "눈"; icon = f"13{suffix}"
+        else:
+            desc = "비"; icon = f"09{suffix}"
+    elif pty in ["2", "3"] and temp <= 0: 
+        desc = "눈"; icon = f"13{suffix}"
+    elif sky == "3": 
+        desc = "구름많음"; icon = f"03{suffix}"
+    elif sky == "4": 
+        desc = "흐림"; icon = f"04{suffix}"
 
     return {
         "city": "기상청 실시간",
@@ -242,21 +250,28 @@ def get_hourly_forecast(lat: float, lon: float, count: int = 24):
     
     for ftime in sorted_times:
         f_data = forecast_dict[ftime]
-        pty = f_data["pty"]; sky = f_data["sky"]
+        pty = f_data["pty"]; sky = f_data["sky"]; t = f_data["temp"]
         hour_num = int(ftime[9:11])
         
         is_day = 6 <= hour_num < 18
         suffix = "d" if is_day else "n"
         
+        # 💡 [핵심 수정] 기온이 0도 이하인데 강수 확률/형태가 있으면 눈으로 변환
         desc = "맑음"; icon = f"01{suffix}"
-        if pty in ["1", "4"]: desc = "비"; icon = f"09{suffix}"
-        elif pty == "3": desc = "눈"; icon = f"13{suffix}"
-        elif pty == "2": desc = "비/눈"; icon = f"13{suffix}"
-        elif sky == "3": desc = "구름많음"; icon = f"03{suffix}"
-        elif sky == "4": desc = "흐림"; icon = f"04{suffix}"
+        if pty in ["1", "4"] or (f_data["pop"] >= 0.3 and t > 0): 
+            if t <= 0:
+                desc = "눈"; icon = f"13{suffix}"
+            else:
+                desc = "비"; icon = f"09{suffix}"
+        elif (pty in ["2", "3"] or f_data["pop"] >= 0.3) and t <= 0: 
+            desc = "눈"; icon = f"13{suffix}"
+        elif sky == "3": 
+            desc = "구름많음"; icon = f"03{suffix}"
+        elif sky == "4": 
+            desc = "흐림"; icon = f"04{suffix}"
         
         result.append({
-            "time": f"{hour_num}시", "temp": round(f_data["temp"]),
+            "time": f"{hour_num}시", "temp": round(t),
             "pop": f_data["pop"], "description": desc, "icon": icon
         })
     return result
@@ -321,14 +336,23 @@ def get_weekly_forecast(lat: float, lon: float):
             avg_wind = sum(winds) / len(winds) if winds else 0
             avg_hum = sum(hums) / len(hums) if hums else 50
             
+            max_t = round(max(temps))
+            min_t = round(min(temps))
+            max_pop = max(pops)
+            
+            # 💡 [핵심 수정] 주간 예보에서도 영하의 날씨에 강수 확률이 30% 이상이면 비 아이콘(09, 10, 11)을 눈(13)으로 강제 변환
+            if max_pop >= 0.3 and max_t <= 0:
+                if rep_icon.startswith("09") or rep_icon.startswith("10") or rep_icon.startswith("11"):
+                    rep_icon = f"13{rep_icon[-1]}"
+            
             result.append({
                 "date": f"{d_obj.month}/{d_obj.day}",
                 "full_date": d_str,
                 "day": weekday,
                 "isToday": d_str == today_str,
-                "temp_max": round(max(temps)),
-                "temp_min": round(min(temps)),
-                "pop": round(max(pops) * 100),
+                "temp_max": max_t,
+                "temp_min": min_t,
+                "pop": round(max_pop * 100),
                 "icon": rep_icon,
                 "wind_speed": round(avg_wind, 1),
                 "humidity": round(avg_hum)
@@ -370,9 +394,6 @@ def get_air_quality(lat: float, lon: float):
     except Exception:
         return {"pm25": 0, "pm10": 0, "level": "점검중"}
 
-# ---------------------------------------------------------
-# ⛰️ 한국의 20대 명산 데이터베이스 및 산악 기상 엔진 (CCTV URL 포함)
-# ---------------------------------------------------------
 MOUNTAINS_DB = {
     "북한산": {
         "lat": 37.6620, "lon": 126.9930, "elevation": 836, "peak": "백운대",
@@ -491,7 +512,7 @@ MOUNTAINS_DB = {
     "마이산": {
         "lat": 35.7611, "lon": 127.4122, "elevation": 686, "peak": "암마이봉",
         "terrain": "역암 바위·데크 계단", "difficulty": "중하", "region": "전북 진안",
-        "course_tip": "탑사~암마이봉 구간은 바위 경사가 가파르며, 겨울철 결빙 시 암마이봉 정상부가 통제될 수 있으니 노면 상태를 꼭 확인하세요.",
+        "course_tip": "암마이봉 구간은 겨울철 결빙 시 통제될 수 있으니 노면 상태를 꼭 확인하세요.",
         "cctv_url": "https://www.youtube.com/results?search_query=%EB%A7%88%EC%9D%B4%EC%82%B0+%EC%8B%A4%EC%8B%9C%EA%B0%84"
     }
 }
@@ -590,9 +611,17 @@ def get_mountain_weather(mountain_name: str):
     mountain_hourly = []
     for h in base_hourly:
         m_h_temp = apply_mountain_lapse_rate(h["temp"], elevation)
+        
+        # 💡 [핵심 수정] 산악 시간대별 예보에서도 영하+강수확률 30% 이상이면 비를 눈으로 변환
+        m_icon = h["icon"]
+        if h["pop"] >= 0.3 and m_h_temp <= 0:
+            if m_icon.startswith("09") or m_icon.startswith("10") or m_icon.startswith("11"):
+                m_icon = f"13{m_icon[-1]}"
+                
         mountain_hourly.append({
             "time": h["time"], "temp": round(m_h_temp), "pop": h["pop"],
-            "description": h["description"], "icon": h["icon"]
+            "description": "눈" if m_icon.startswith("13") else h["description"], 
+            "icon": m_icon
         })
 
     mountain_weekly = []
@@ -601,12 +630,20 @@ def get_mountain_weather(mountain_name: str):
         w_temp_min = round(apply_mountain_lapse_rate(w["temp_min"], elevation))
         w_wind = round(max(1.2, w["wind_speed"] * 1.6 + (elevation / 1000.0)), 1)
         w_hum = min(100, int(w["humidity"] + 8))
+        
+        # 💡 [핵심 수정] 산악 주간 예보에서도 영하+강수확률 30% 이상이면 비를 눈으로 변환
+        m_w_icon = w["icon"]
+        if w["pop"] >= 30 and w_temp_max <= 0:
+            if m_w_icon.startswith("09") or m_w_icon.startswith("10") or m_w_icon.startswith("11"):
+                m_w_icon = f"13{m_w_icon[-1]}"
+                
         mountain_weekly.append({
             **w,
             "temp_max": w_temp_max,
             "temp_min": w_temp_min,
             "wind_speed": w_wind,
-            "humidity": w_hum
+            "humidity": w_hum,
+            "icon": m_w_icon
         })
 
     return {
