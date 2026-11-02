@@ -1,6 +1,7 @@
 import os
 import requests
 import math
+import concurrent.futures
 from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 
@@ -8,7 +9,7 @@ load_dotenv()
 
 KMA_API_KEY = os.getenv("KMA_API_KEY")
 OWM_API_KEY = os.getenv("OPENWEATHER_API_KEY")
-MOUNTAIN_API_KEY = os.getenv("MOUNTAIN_API_KEY") # 💡 산림청 API 키 추가
+MOUNTAIN_API_KEY = os.getenv("MOUNTAIN_API_KEY")
 BASE = "https://api.openweathermap.org/data/2.5"
 
 def get_nx_ny(lat, lon):
@@ -357,48 +358,221 @@ def get_air_quality(lat: float, lon: float):
         return {"pm25": 0, "pm10": 0, "level": "점검중"}
 
 # ---------------------------------------------------------
-# ⛰️ 등산 특화 날씨 데이터 환경 구축 (산림청 API + 고도 보정)
+# ⛰️ 한국의 20대 명산 데이터베이스 및 산악 기상 엔진
 # ---------------------------------------------------------
 MOUNTAINS_DB = {
-    "북한산": {"lat": 37.6620, "lon": 126.9930, "elevation": 836},
-    "설악산": {"lat": 38.1195, "lon": 128.4655, "elevation": 1708},
-    "한라산": {"lat": 33.3615, "lon": 126.5292, "elevation": 1947},
-    "지리산": {"lat": 35.3369, "lon": 127.7306, "elevation": 1915},
-    "관악산": {"lat": 37.4445, "lon": 126.9639, "elevation": 632},
-    "도봉산": {"lat": 37.6987, "lon": 127.0155, "elevation": 740},
-    "계룡산": {"lat": 36.3533, "lon": 127.2144, "elevation": 845},
+    "북한산": {
+        "lat": 37.6620, "lon": 126.9930, "elevation": 836, "peak": "백운대",
+        "terrain": "화강암 암릉", "difficulty": "중상", "region": "서울/경기",
+        "course_tip": "백운대 정상 부근 화강암 바위가 가파르고 미끄러우니 접지력이 좋은 등산화와 장갑을 꼭 착용하세요."
+    },
+    "설악산": {
+        "lat": 38.1195, "lon": 128.4655, "elevation": 1708, "peak": "대청봉",
+        "terrain": "고산 암릉·돌계단", "difficulty": "상", "region": "강원 인제/속초",
+        "course_tip": "오색~대청봉 코스는 경사가 급하고 정상 능선에 강한 칼바람이 불어 사계절 방풍 재킷이 필수입니다."
+    },
+    "한라산": {
+        "lat": 33.3615, "lon": 126.5292, "elevation": 1947, "peak": "백록담",
+        "terrain": "고산 화산지형·현무암", "difficulty": "상", "region": "제주",
+        "course_tip": "성판악·관음사 코스는 사전 탐방 예약이 필수이며, 정상 백록담은 평지보다 12°C 이상 낮고 기상 변화가 급격합니다."
+    },
+    "지리산": {
+        "lat": 35.3369, "lon": 127.7306, "elevation": 1915, "peak": "천왕봉",
+        "terrain": "고산 능선·너덜길", "difficulty": "상", "region": "경남/전남/전북",
+        "course_tip": "중산리~천왕봉 코스는 장거리 산행이므로 일몰 시간과 체력을 고려해 헤드랜턴과 행동식을 충분히 준비하세요."
+    },
+    "덕유산": {
+        "lat": 35.8596, "lon": 127.7468, "elevation": 1614, "peak": "향적봉",
+        "terrain": "아고산대 능선·주목군락", "difficulty": "중하", "region": "전북 무주",
+        "course_tip": "무주리조트 곤돌라로 설천봉까지 쉽게 오를 수 있으나, 향적봉 정상 능선은 습도가 높고 상고대·강풍이 잦아 보온에 유의하세요."
+    },
+    "소백산": {
+        "lat": 36.9575, "lon": 128.4847, "elevation": 1439, "peak": "비로봉",
+        "terrain": "초원 능선(육산)", "difficulty": "중", "region": "충북 단양/경북 영주",
+        "course_tip": "나무가 없는 탁 트인 능선이라 바람을 막아줄 지형물이 없습니다. 체감온도가 급락하니 방풍·방한모를 꼭 챙기세요."
+    },
+    "태백산": {
+        "lat": 37.0964, "lon": 128.9163, "elevation": 1567, "peak": "장군봉(천제단)",
+        "terrain": "완만한 육산·주목군락", "difficulty": "중하", "region": "강원 태백",
+        "course_tip": "유일사·당골 코스는 해발고도에 비해 경사가 완만해 초보자도 오르기 좋으며, 겨울철 눈꽃과 일출 조망이 뛰어납니다."
+    },
+    "오대산": {
+        "lat": 37.7946, "lon": 128.5432, "elevation": 1563, "peak": "비로봉",
+        "terrain": "부드러운 흙길(육산)", "difficulty": "중", "region": "강원 평창/홍천",
+        "course_tip": "상원사~비로봉 구간은 흙길과 계단이 잘 정비되어 있으나 정상 직전 오르막이 가파르니 등산 스틱을 활용하세요."
+    },
+    "치악산": {
+        "lat": 37.3652, "lon": 128.0558, "elevation": 1288, "peak": "비로봉",
+        "terrain": "급경사 계단·너덜길", "difficulty": "상", "region": "강원 원주",
+        "course_tip": "구룡사~사다리병창 코스는 악명 높은 급경사 철계단과 돌길이 이어지므로 무릎 보호대와 스틱이 필수입니다."
+    },
+    "월악산": {
+        "lat": 36.8856, "lon": 128.1058, "elevation": 1097, "peak": "영봉",
+        "terrain": "험준한 암릉·철계단", "difficulty": "상", "region": "충북 제천",
+        "course_tip": "영봉 직전 수백 개의 가파른 철계단 구간이 있으며 충주호에서 불어오는 골바람이 강해 미끄럼과 강풍에 주의해야 합니다."
+    },
+    "속리산": {
+        "lat": 36.5430, "lon": 127.8712, "elevation": 1058, "peak": "천왕봉(문장대)",
+        "terrain": "기암괴석·암릉 능선", "difficulty": "중", "region": "충북 보은/경북 상주",
+        "course_tip": "문장대 바위 정상은 사방이 트여 조망이 압도적이지만 난간 구간에서 강풍이 불 때 안전에 각별히 유의하세요."
+    },
+    "가야산": {
+        "lat": 35.8225, "lon": 128.1189, "elevation": 1430, "peak": "상왕봉(우두봉)",
+        "terrain": "뾰족한 암봉·돌계단", "difficulty": "중상", "region": "경남 합천/경북 성주",
+        "course_tip": "해인사·백운동 코스 모두 정상 부근 암릉 구간이 험준하므로 비나 눈이 온 뒤에는 바위 미끄럼을 특히 조심하세요."
+    },
+    "계룡산": {
+        "lat": 36.3533, "lon": 127.2144, "elevation": 845, "peak": "관음봉",
+        "terrain": "암릉 능선·가파른 계단", "difficulty": "중상", "region": "충남 공주/계룡",
+        "course_tip": "동학사~남매탑~관음봉 코스는 해발고도는 낮아도 자연성릉 바위 능선과 고깔바위 계단이 가팔라 체력 소모가 큽니다."
+    },
+    "무등산": {
+        "lat": 35.1342, "lon": 126.9886, "elevation": 1187, "peak": "서석대·입석대",
+        "terrain": "주상절리대·완만한 능선", "difficulty": "중", "region": "광주/전남 화순",
+        "course_tip": "증심사·원효사 코스는 완만하나 서석대 주상절리 능선 구간은 그늘이 적고 바람이 강해 자외선 차단과 방풍 준비가 필요합니다."
+    },
+    "주왕산": {
+        "lat": 36.3894, "lon": 129.1628, "elevation": 721, "peak": "주봉",
+        "terrain": "기암절벽 협곡·흙길", "difficulty": "하", "region": "경북 청송",
+        "course_tip": "대전사~주봉~용추폭포 코스는 험한 구간이 적어 초보자 산행에 적합하며, 협곡 내 습도가 높아 아침 물안개가 자주 낍니다."
+    },
+    "도봉산": {
+        "lat": 37.6987, "lon": 127.0155, "elevation": 740, "peak": "자운봉(신선대)",
+        "terrain": "거대 화강암 암봉", "difficulty": "중상", "region": "서울 도봉/경기 양주",
+        "course_tip": "신선대 정상 오름길은 가파른 바위와 쇠난간을 잡고 올라야 하므로 반장갑과 릿지화(등산화) 착용을 강력히 권장합니다."
+    },
+    "관악산": {
+        "lat": 37.4445, "lon": 126.9639, "elevation": 632, "peak": "연주대",
+        "terrain": "바위 능선·돌계단", "difficulty": "중", "region": "서울 관악/경기 과천",
+        "course_tip": "사당·서울대 코스는 바위가 많고 노출된 암릉 구간이 이어져 비나 서리가 내린 날에는 미끄럼 사고에 주의해야 합니다."
+    },
+    "대둔산": {
+        "lat": 36.1247, "lon": 127.3211, "elevation": 878, "peak": "마천대",
+        "terrain": "기암절벽·구름다리·철계단", "difficulty": "중", "region": "충남 논산/전북 완주",
+        "course_tip": "금강구름다리와 삼선계단은 경사가 매우 가파르고 일방통행이므로 고소공포증이나 강풍 시 우회 등산로를 이용하세요."
+    },
+    "내장산": {
+        "lat": 35.4783, "lon": 126.8892, "elevation": 763, "peak": "신선봉",
+        "terrain": "단풍 계곡·암릉 능선", "difficulty": "중", "region": "전북 정읍/순창",
+        "course_tip": "일주문~내장사 구간은 평탄하지만 신선봉 정상으로 오르는 능선은 경사가 급하고 습기가 많아 미끄럼에 유의하세요."
+    },
+    "마이산": {
+        "lat": 35.7611, "lon": 127.4122, "elevation": 686, "peak": "암마이봉",
+        "terrain": "역암 바위·데크 계단", "difficulty": "중하", "region": "전북 진안",
+        "course_tip": "탑사~암마이봉 구간은 바위 경사가 가파르며, 겨울철 결빙 시 암마이봉 정상부가 통제될 수 있으니 노면 상태를 꼭 확인하세요."
+    }
 }
 
 def search_mountain(q: str):
+    q_clean = q.strip()
     for name, data in MOUNTAINS_DB.items():
-        if q in name or name in q:
-            return {"name": name, "lat": data["lat"], "lon": data["lon"], "elevation": data["elevation"]}
+        if q_clean in name or name in q_clean or q_clean in data.get("peak", ""):
+            return {
+                "name": name,
+                "lat": data["lat"],
+                "lon": data["lon"],
+                "elevation": data["elevation"],
+                "peak": data["peak"],
+                "terrain": data["terrain"],
+                "difficulty": data["difficulty"],
+                "region": data["region"],
+                "course_tip": data["course_tip"]
+            }
     return None
 
 def apply_mountain_lapse_rate(temp: float, elevation: int) -> float:
-    drop = ((elevation - 50) / 100.0) * 0.65
+    # 해발 100m 상승 시 기온 약 0.65°C 하강 (평지 50m 기준)
+    drop = ((max(50, elevation) - 50) / 100.0) * 0.65
     return temp - drop
+
+def calculate_safe_descent_time(sunset_str: str) -> str:
+    """일몰 2시간 전을 안전 하산 마감 시각으로 계산합니다."""
+    try:
+        h, m = map(int, sunset_str.split(":"))
+        total_min = max(0, (h * 60 + m) - 120)
+        return f"{total_min // 60:02d}:{total_min % 60:02d}"
+    except Exception:
+        return "15:30"
+
+def fetch_forest_service_api(mountain_name: str) -> dict | None:
+    """산림청 산악기상정보 API 호출 (응답 지연이나 미등록 키 에러 시 즉시 패스)"""
+    if not MOUNTAIN_API_KEY:
+        return None
+    try:
+        url = "http://apis.data.go.kr/1400377/mtweather/mountListSearch"
+        params = {
+            "serviceKey": MOUNTAIN_API_KEY,
+            "pageNo": "1",
+            "numOfRows": "10",
+            "_type": "json",
+            "searchWrd": mountain_name
+        }
+        res = requests.get(url, params=params, timeout=2.5)
+        if res.status_code == 200:
+            items = res.json().get("response", {}).get("body", {}).get("items", {}).get("item", [])
+            if isinstance(items, dict):
+                items = [items]
+            if items and len(items) > 0:
+                first = items[0]
+                obs_temp = first.get("tm2m") or first.get("temp")
+                obs_wind = first.get("ws2m") or first.get("wind")
+                obs_hum = first.get("hm2m") or first.get("reh")
+                if obs_temp is not None:
+                    return {
+                        "temp": float(obs_temp),
+                        "wind_speed": float(obs_wind) if obs_wind is not None else None,
+                        "humidity": int(float(obs_hum)) if obs_hum is not None else None
+                    }
+    except Exception:
+        pass
+    return None
 
 def get_mountain_weather(mountain_name: str):
     m_info = MOUNTAINS_DB.get(mountain_name)
-    if not m_info: return None
-        
-    lat, lon, elevation = m_info["lat"], m_info["lon"], m_info["elevation"]
-    base_weather = get_current_weather(lat, lon)
-    base_hourly = get_hourly_forecast(lat, lon, count=24)
-    
-    # 산림청 API 연동 (에러 대비용 하이브리드 로직)
-    mountain_temp = apply_mountain_lapse_rate(base_weather["temp"], elevation)
-    mountain_wind = base_weather["wind_speed"] * 1.5 
-    
-    if MOUNTAIN_API_KEY:
-        try:
-            url = "http://apis.data.go.kr/1400000/mntInfoService2/mweather"
-            # 향후 실제 연동 시 필요한 파라미터를 여기에 채워넣으면 됩니다.
-            pass
-        except Exception:
-            pass
+    if not m_info:
+        found = search_mountain(mountain_name)
+        if not found:
+            return None
+        mountain_name = found["name"]
+        m_info = MOUNTAINS_DB[mountain_name]
 
+    lat, lon, elevation = m_info["lat"], m_info["lon"], m_info["elevation"]
+
+    # 💡 4대 기상 데이터 + 산림청 API를 병렬(ThreadPoolExecutor)로 동시에 수집!
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        f_base = executor.submit(get_current_weather, lat, lon)
+        f_hourly = executor.submit(get_hourly_forecast, lat, lon, 24)
+        f_aqi = executor.submit(get_air_quality, lat, lon)
+        f_weekly = executor.submit(get_weekly_forecast, lat, lon)
+        f_forest = executor.submit(fetch_forest_service_api, mountain_name)
+
+        base_weather = f_base.result()
+        base_hourly = f_hourly.result()
+        air_quality = f_aqi.result()
+        base_weekly = f_weekly.result()
+        forest_obs = f_forest.result()
+
+    base_temp = round(base_weather["temp"])
+    summit_temp = round(apply_mountain_lapse_rate(base_weather["temp"], elevation))
+    summit_wind = round(max(1.2, base_weather["wind_speed"] * 1.6 + (elevation / 1000.0)), 1)
+    summit_humidity = min(100, int(base_weather.get("humidity", 50) + 8))
+
+    # 산림청 실측값이 있으면 우선 반영
+    if forest_obs:
+        summit_temp = round(forest_obs["temp"])
+        if forest_obs.get("wind_speed") is not None:
+            summit_wind = round(forest_obs["wind_speed"], 1)
+        if forest_obs.get("humidity") is not None:
+            summit_humidity = forest_obs["humidity"]
+
+    # 산 정상 칼바람 체감온도 계산 (풍속에 따른 체감 하락 반영)
+    wind_chill_drop = round(summit_wind * 0.7) if summit_temp <= 15 else 0
+    summit_feels_like = summit_temp - wind_chill_drop
+    summit_drop = max(1, base_temp - summit_temp)
+
+    safe_descent_time = calculate_safe_descent_time(base_weather.get("sunset", "17:30"))
+
+    # 시간대별 예보 고도 보정
     mountain_hourly = []
     for h in base_hourly:
         m_h_temp = apply_mountain_lapse_rate(h["temp"], elevation)
@@ -409,22 +583,49 @@ def get_mountain_weather(mountain_name: str):
             "description": h["description"],
             "icon": h["icon"]
         })
-    
+
+    # 💡 주간 예보(5일) 고도 보정 (우측 하단 주간 예보 누락 완벽 해결!)
+    mountain_weekly = []
+    for w in base_weekly:
+        mountain_weekly.append({
+            **w,
+            "temp_max": round(apply_mountain_lapse_rate(w["temp_max"], elevation)),
+            "temp_min": round(apply_mountain_lapse_rate(w["temp_min"], elevation))
+        })
+
     return {
         "mountain_name": mountain_name,
         "elevation": elevation,
+        "mountain_info": {
+            "name": mountain_name,
+            "elevation": elevation,
+            "peak": m_info["peak"],
+            "terrain": m_info["terrain"],
+            "difficulty": m_info["difficulty"],
+            "region": m_info["region"],
+            "course_tip": m_info["course_tip"],
+            "base_temp": base_temp,
+            "summit_drop": summit_drop,
+            "safe_descent_time": safe_descent_time
+        },
         "current": {
-            "temp": round(mountain_temp),
-            "feels_like": round(apply_mountain_lapse_rate(base_weather["feels_like"], elevation)),
-            "wind_speed": round(mountain_wind, 1),
+            "city": f"{mountain_name} ({m_info['peak']})",
+            "temp": summit_temp,
+            "feels_like": summit_feels_like,
+            "base_temp": base_temp,
+            "summit_drop": summit_drop,
+            "wind_speed": summit_wind,
             "description": base_weather["description"],
             "icon": base_weather["icon"],
             "temp_diff": base_weather.get("temp_diff", 0),
-            "humidity": base_weather.get("humidity", 50),
-            "sunrise": base_weather.get("sunrise", "06:00"),
-            "sunset": base_weather.get("sunset", "18:00"),
+            "humidity": summit_humidity,
+            "sunrise": base_weather.get("sunrise", "06:30"),
+            "sunset": base_weather.get("sunset", "17:30"),
+            "safe_descent_time": safe_descent_time,
             "temp_max": round(apply_mountain_lapse_rate(base_weather["temp_max"], elevation)),
             "temp_min": round(apply_mountain_lapse_rate(base_weather["temp_min"], elevation))
         },
-        "hourly": mountain_hourly
+        "hourly": mountain_hourly,
+        "air_quality": air_quality,
+        "weekly": mountain_weekly
     }

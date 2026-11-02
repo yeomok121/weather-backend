@@ -5,7 +5,16 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Header
 import requests
 from app.advice import get_ai_contents
-from app.weather import get_current_weather, get_hourly_forecast, search_location, get_air_quality, get_weekly_forecast, search_mountain, get_mountain_weather
+from app.weather import (
+    get_current_weather,
+    get_hourly_forecast,
+    search_location,
+    get_air_quality,
+    get_weekly_forecast,
+    search_mountain,
+    get_mountain_weather,
+    MOUNTAINS_DB
+)
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import bcrypt
@@ -59,6 +68,13 @@ def location(q: str):
 # ---------------------------------------------------------
 # ⛰️ 산악 기상 전용 API
 # ---------------------------------------------------------
+@app.get("/api/mountain/list")
+def api_mountain_list():
+    return [
+        {"name": name, **info}
+        for name, info in MOUNTAINS_DB.items()
+    ]
+
 @app.get("/api/mountain/search")
 def api_search_mountain(q: str):
     result = search_mountain(q)
@@ -72,7 +88,6 @@ def api_mountain_summary(name: str):
     if not result:
         raise HTTPException(status_code=404, detail="산 정보를 불러올 수 없습니다.")
     return result
-
 
 class SignUpRequest(BaseModel):
     username: str
@@ -123,10 +138,11 @@ class AIRequest(BaseModel):
     current: dict
     forecast: list
     air_quality: dict | None = None
+    mountain_info: dict | None = None
 
 @app.post("/api/weather/ai")
 def weather_ai(req: AIRequest):
-    ai_data = get_ai_contents(req.current, req.forecast, req.air_quality or {})
+    ai_data = get_ai_contents(req.current, req.forecast, req.air_quality or {}, req.mountain_info)
     return {"advice": [ai_data["one_line"]], "ai_briefing": ai_data["briefing"]}
 
 def _hash_pw(password: str) -> str:
