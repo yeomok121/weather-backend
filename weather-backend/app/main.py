@@ -96,10 +96,14 @@ def api_mountain_summary(name: str):
     return result
 
 @app.get("/api/fishing/summary")
-def api_fishing_summary(place: str = "김녕", region: str = "12A20100"):
+def api_fishing_summary(place: str = "추자도 해상", region: str = "", lat: float = 33.96194, lon: float = 126.44527):
     """Public fishing dashboard data from approved KHOA/KMA marine APIs."""
     try:
-        return get_fishing_summary(place=place, region=region)
+        if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+            raise HTTPException(status_code=422, detail="위치 좌표 범위를 확인해 주세요.")
+        return get_fishing_summary(place=place, region=region, lat=lat, lon=lon)
+    except HTTPException:
+        raise
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
     except Exception:
