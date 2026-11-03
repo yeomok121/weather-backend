@@ -150,7 +150,7 @@ def get_fishing_summary(place: str, region: str, lat: float = 33.96194, lon: flo
     try:
         response = _fetch(
             f"{KHOA_BASE}/tidebed/GetTidebedApiService",
-            {"reqDate": date, "lot": str(lon), "lat": str(lat), "min": "60", "type": "json", "serviceKey": tide_key},
+            {"reqDate": date, "lot": str(lon), "lat": str(lat), "min": "60", "pageNo": "1", "numOfRows": "24", "type": "json", "serviceKey": tide_key},
         )
         tide = _safe_json(response)
         if tide is None:
