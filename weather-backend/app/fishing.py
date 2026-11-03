@@ -92,6 +92,8 @@ def get_fishing_summary(place: str, region: str, lat: float = 33.96194, lon: flo
     if not forecast_key or not tide_key:
         raise RuntimeError("해양 예보 또는 조위 API 설정이 아직 완료되지 않았습니다.")
 
+    start = (now - timedelta(hours=48)).strftime("%Y%m%d%H")
+    end = now.strftime("%Y%m%d%H")
     errors = {}
     forecast = []
     buoy = []
@@ -105,14 +107,21 @@ def get_fishing_summary(place: str, region: str, lat: float = 33.96194, lon: flo
             if matched is None:
                 matched = next((item for item in available_regions if "제주" in item.get("REG_NAME", "")), None)
             if matched is None:
-                raise RuntimeError("제주 해상 예보 구역을 찾지 못했습니다.")
-            region = matched["REG_ID"]
-            region_name = matched.get("REG_NAME", "")
+                # KMA zone list formats can change; this is the official Jeju-wide short-term zone.
+                region = "12D00000"
+                region_name = "제주도 전해상"
+            else:
+                region = matched["REG_ID"]
+                region_name = matched.get("REG_NAME", "")
         response = _fetch(
             f"{KMA_BASE}/fct_afs_do.php",
-            {"reg": region, "disp": "1", "help": "1", "authKey": forecast_key},
+            {"reg": region, "tmfc1": start, "tmfc2": end, "disp": "1", "help": "1", "authKey": forecast_key},
         )
         forecast = _kma_records(response, "forecast")
+        if forecast:
+            latest_issue = max(row.get("TM_FC", "") for row in forecast)
+            forecast = [row for row in forecast if row.get("TM_FC") == latest_issue]
+            forecast = [row for row in forecast if row.get("TM_EF", "") >= now.strftime("%Y%m%d%H")]
     except (requests.RequestException, RuntimeError, KeyError):
         errors["forecast"] = "단기 해상예보를 가져오지 못했습니다. 예보 구역을 확인해 주세요."
 
@@ -122,6 +131,8 @@ def get_fishing_summary(place: str, region: str, lat: float = 33.96194, lon: flo
             {"tm": "", "stn": "0", "help": "1", "authKey": forecast_key},
         )
         buoy = _kma_records(response, "buoy")
+        # TP=B is the buoy set used by the fishing dashboard; discard missing sentinel values.
+        buoy = [row for row in buoy if row.get("TP") == "B" and row.get("WH") not in (None, "-99", "-99.0")]
         for row in buoy:
             try:
                 row["distance_km"] = _distance_km(lat, lon, float(row["LAT"]), float(row["LON"]))
