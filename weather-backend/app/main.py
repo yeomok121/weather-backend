@@ -24,6 +24,7 @@ from pydantic import BaseModel, Field
 import bcrypt
 from app.database import get_conn
 from app.marine_integrations import check_marine_integrations
+from app.fishing import get_fishing_summary
 
 load_dotenv()
 
@@ -93,6 +94,16 @@ def api_mountain_summary(name: str):
     if not result:
         raise HTTPException(status_code=404, detail="산 정보를 불러올 수 없습니다.")
     return result
+
+@app.get("/api/fishing/summary")
+def api_fishing_summary(place: str = "김녕", region: str = "12A20100"):
+    """Public fishing dashboard data from approved KHOA/KMA marine APIs."""
+    try:
+        return get_fishing_summary(place=place, region=region)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    except Exception:
+        raise HTTPException(status_code=502, detail="해양 정보를 불러오지 못했습니다. 잠시 후 다시 시도해 주세요.")
 
 class SignUpRequest(BaseModel):
     username: str
