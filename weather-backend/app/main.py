@@ -23,6 +23,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 import bcrypt
 from app.database import get_conn
+from app.marine_integrations import check_marine_integrations
 
 load_dotenv()
 
@@ -929,6 +930,12 @@ class AdminUserUpdate(BaseModel):
 def admin_verify(x_admin_password: str | None = Header(default=None)):
     require_admin(x_admin_password)
     return {"ok": True}
+
+@app.post("/api/admin/integrations/marine/check")
+def admin_check_marine_integrations(x_admin_password: str | None = Header(default=None)):
+    """Privileged, secret-safe live connectivity test for configured marine APIs."""
+    require_admin(x_admin_password)
+    return check_marine_integrations()
 
 @app.get("/api/admin/users")
 def admin_list_users(x_admin_password: str | None = Header(default=None)):
