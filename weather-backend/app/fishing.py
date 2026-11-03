@@ -23,8 +23,12 @@ def _safe_json(response: requests.Response):
         return None
 
 
-def _kma_records(response: requests.Response):
+def _kma_records(response: requests.Response, kind: str):
     """Keep provider text out of the UI except for parsed data rows."""
+    fallback_headers = {
+        "buoy": ["TP", "TM", "STN_ID", "STN_KO", "LON", "LAT", "WH", "WD", "WS", "WS_GST", "TW", "TA", "PA", "HM"],
+        "forecast": ["REG_ID", "TM_FC", "TM_EF", "MOD", "NE", "STN", "C", "MAN_ID", "MAN_FC", "W1", "T", "W2", "WS1", "WS2", "WH1", "WH2", "SKY", "PREP", "WF", "ETC"],
+    }[kind]
     headers = []
     rows = []
     for raw in response.text.splitlines():
@@ -38,11 +42,9 @@ def _kma_records(response: requests.Response):
             continue
         cols = [part.strip() for part in line.split(",")]
         if len(cols) >= 4:
-            if headers and len(headers) == len(cols):
-                rows.append(dict(zip(headers, cols)))
-            else:
-                rows.append({"fields": cols})
-    return rows
+            row_headers = headers if len(headers) == len(cols) else fallback_headers[:len(cols)]
+            rows.append(dict(zip(row_headers, cols)))
+    return rows[:8]
 
 
 def get_fishing_summary(place: str, region: str) -> dict:
@@ -65,7 +67,7 @@ def get_fishing_summary(place: str, region: str) -> dict:
             f"{KMA_BASE}/fct_afs_do.php",
             {"reg": region, "tmfc1": start, "tmfc2": end, "disp": "1", "help": "1", "authKey": forecast_key},
         )
-        forecast = _kma_records(response)
+        forecast = _kma_records(response, "forecast")
     except requests.RequestException:
         errors["forecast"] = "단기 해상예보를 가져오지 못했습니다. 예보 구역을 확인해 주세요."
 
@@ -74,7 +76,7 @@ def get_fishing_summary(place: str, region: str) -> dict:
             f"{KMA_BASE}/sea_obs.php",
             {"tm": "", "stn": "0", "help": "1", "authKey": forecast_key},
         )
-        buoy = _kma_records(response)
+        buoy = _kma_records(response, "buoy")
     except requests.RequestException:
         errors["buoy"] = "해양 관측 자료를 가져오지 못했습니다."
 
