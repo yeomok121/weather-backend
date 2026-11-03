@@ -33,12 +33,12 @@ def make_advice(current: dict, forecast: list) -> list:
     if "비" in desc or "소나기" in desc:
         if is_night:
             return [random.choice([
-                "🌧️ 빗소리가 들리는 밤이네요. 창문을 잘 닫고 포근한 밤 보내세요!",
-                "☔ 밤사이 비가 내리고 있어요. 내일 아침 출근·등교길 우산 꼭 챙기세요!"
+                "🌧️ 시간대 예보에 비가 표시되어 있습니다. 외출 전 최신 예보를 확인하세요.",
+                "☔ 예보에 강수가 포함되어 있습니다. 내일 아침 외출 전 강수 시각을 확인하세요."
             ])]
         return [random.choice([
-            "☔ 지금 비가 내리고 있어요. 외출하실 때 우산 잊지 마세요!",
-            "🌧️ 비 내리는 하루네요. 빗길 미끄럼 주의하시고 안전한 하루 보내세요!"
+            "☔ 제공된 시간대 예보에 강수가 표시되어 있습니다. 외출할 때 우산을 고려하세요.",
+            "🌧️ 예보에 비가 포함되어 있습니다. 빗길 이동 시 미끄럼에 유의하세요."
         ])]
         
     if "눈" in desc:
@@ -46,8 +46,8 @@ def make_advice(current: dict, forecast: list) -> list:
 
     if max_pop >= 0.5:
         if is_night:
-            return ["🌂 밤이나 내일 오전 중 비 소식이 있어요. 머리맡에 우산을 미리 챙겨두세요!"]
-        return ["☔ 곧 비가 올 확률이 높아요. 가방 속에 작은 우산 하나 꼭 챙기세요!"]
+            return [f"🌂 향후 6시간 예보 중 강수확률이 가장 높은 시간대가 {round(max_pop * 100)}%입니다. 외출 전 해당 시간 예보를 다시 확인하세요."]
+        return [f"☔ 향후 6시간 예보에 강수 가능성({round(max_pop * 100)}%)이 있습니다. 외출 시 우산을 고려하세요."]
 
     if wind >= 8:
         if is_night:
@@ -67,15 +67,15 @@ def make_advice(current: dict, forecast: list) -> list:
             return ["☀️ 조금 덥게 느껴질 수 있는 낮이에요. 시원한 물 자주 마시며 보내세요!"]
         elif feels_like <= 8:
             return ["🥶 낮에도 바람이 차갑네요. 따뜻한 음료와 함께 포근한 오후 보내세요!"]
-        return ["☀️ 활동하기 쾌적한 오후예요! 가볍게 산책하며 기분 전환해 보세요."]
+        return [f"☀️ 제공된 예보 기준 체감온도는 {feels_like}°C입니다. 외출 전 시간별 강수와 대기질도 확인하세요."]
     elif 17 <= hour < 21:
         if feels_like <= 14:
             return ["🌇 해가 지면서 공기가 금세 차가워졌어요. 귀갓길 따뜻하게 입으세요!"]
-        return ["🌇 선선한 바람이 불어 저녁 산책하기 딱 좋은 날씨예요. 오늘 하루도 고생 많으셨어요!"]
+        return [f"🌇 제공된 예보 기준 체감온도는 {feels_like}°C입니다. 귀갓길 기온 변화에 맞춰 겉옷을 준비하세요."]
     else:
         if feels_like <= 12:
             return [f"🌙 밤기온이 {temp}°C까지 내려가 제법 쌀쌀해요. 창문 잘 닫고 포근한 밤 보내세요!"]
-        return ["🌙 선선하고 쾌적한 밤이에요. 오늘 하루도 고생 많으셨습니다, 편안한 밤 보내세요!"]
+        return ["🌙 제공된 예보 기준 별도 강수·강풍 신호는 없습니다. 실제 기상은 달라질 수 있으니 외출 전 다시 확인하세요."]
 
 # 💡 2. 일반 도시용 비상 상세 브리핑 생성 함수
 def make_fallback_briefing(current: dict, forecast: list, air_quality: dict) -> str:
@@ -84,7 +84,7 @@ def make_fallback_briefing(current: dict, forecast: list, air_quality: dict) -> 
     feels_like = round(current.get("feels_like", temp))
     desc = current.get("description", "맑음")
     wind = current.get("wind_speed", 0)
-    pm = air_quality.get("level", "보통") if air_quality else "보통"
+    pm = air_quality.get("level", "확인 불가") if air_quality else "확인 불가"
     max_pop = int(max((f.get("pop", 0) for f in forecast[:6]), default=0) * 100) if forecast else 0
 
     greeting = (
@@ -97,8 +97,8 @@ def make_fallback_briefing(current: dict, forecast: list, air_quality: dict) -> 
     rain_info = f"향후 강수 확률이 {max_pop}%로 예보되어 있으니 외출 시 작은 우산을 챙기시는 것이 좋겠습니다. " if max_pop >= 40 else ""
 
     return (
-        f"{greeting} 현재 하늘은 {desc} 상태이며, 기온은 {temp}°C(체감 {feels_like}°C), 풍속은 {wind}m/s를 기록하고 있습니다. "
-        f"미세먼지 농도는 '{pm}' 수준을 보이고 있습니다. {rain_info}일교차와 기온 변화에 유의하시어 건강하고 쾌적한 시간 보내시길 바랍니다."
+        f"{greeting} 제공된 날씨 자료 기준 하늘은 {desc}, 기온은 {temp}°C(체감 {feels_like}°C), 풍속은 {wind}m/s입니다. "
+        f"대기질 자료는 '{pm}'로 표시됩니다. {rain_info}이는 예보 기반 참고 안내이므로 외출 전 시간별 예보와 발표 시각을 확인해 주세요."
     )
 
 # 💡 3. 산악 모드 전용 한 줄 멘트 & 상세 등산 브리핑 생성 함수 (Fallback 포함)
@@ -139,7 +139,7 @@ def make_mountain_fallback(current: dict, forecast: list, mountain_info: dict) -
 
     briefing = (
         f"현재 {name} {peak}(해발 {elevation}m) 기준 기온은 {temp}°C(체감 {feels_like}°C)로 산 입구 평지보다 약 {summit_drop}°C 더 낮으며, "
-        f"능선 풍속은 {wind}m/s를 기록하고 있습니다. {view_comment} "
+        f"제공 자료 기준 능선 풍속은 {wind}m/s입니다. {view_comment} "
         f"{name}은(는) '{terrain}' 지형 특성상 기온 하강 시 바위나 계단이 미끄러울 수 있으니 {course_tip} "
         f"산속은 일몰 전 급격히 어두워지므로 늦어도 {safe_descent} 이전에는 하산을 시작하시기 바랍니다."
     )
@@ -177,7 +177,7 @@ def get_ai_contents(current: dict, forecast: list, air_quality: dict, mountain_i
         if now_ts - saved_time < CACHE_TTL:
             return saved_data
 
-    pm = air_quality.get("level", "보통") if air_quality else "보통"
+    pm = air_quality.get("level", "확인 불가") if air_quality else "확인 불가"
 
     if mountain_info:
         m_name = mountain_info.get("name", "산")
@@ -190,6 +190,7 @@ def get_ai_contents(current: dict, forecast: list, air_quality: dict, mountain_i
 
         prompt = (
             f"당신은 대한민국 국립공원 산악 안전 및 등산 기상 전문 가이드입니다.\n"
+            "정상 기상값은 산림청 관측 응답값 또는 평지 예보의 고도 보정 추정값일 수 있습니다. 실제 관측으로 확인된 것처럼 말하지 말고 제공 자료 기준이라고 밝혀주세요.\n"
             f"대상 산: {m_name} {m_peak} (해발 {m_elev}m, 지형: {m_terrain})\n"
             f"산 정상 기상: 현재 시각 {hour}시, 날씨 {desc}, 정상 기온 {temp}도(체감 {feels_like}도, 평지 입구보다 {m_drop}도 낮음), "
             f"풍속 {wind}m/s, 습도 {humidity}%, 미세먼지 {pm}, 강수확률 {max_pop}%, 권장 하산 마감 시각 {m_descent}\n"
@@ -212,6 +213,7 @@ def get_ai_contents(current: dict, forecast: list, air_quality: dict, mountain_i
         )
         prompt = (
             f"현재 시각은 {hour}시({time_context})이며, 날씨는 {desc}, 기온은 {temp}도(체감 {feels_like}도), 풍속은 {wind}m/s, 미세먼지는 {pm}, 강수확률은 {max_pop}%입니다.\n"
+            "현재 기온·시간별 값은 기상청 동네예보 기반이고 체감온도·대기질은 OpenWeather 자료입니다. 관측 실황이라고 단정하지 말고 제공 자료 기준 또는 예보 기준이라고 표현하세요.\n"
             "아래 두 가지 항목을 작성해주세요. 마크다운(**, ## 등)은 절대 사용하지 말고 평문과 이모지만 사용하세요.\n\n"
             f"1. 한줄멘트: 현재 시간대({time_context})와 날씨 상황에 딱 맞는 센스 있고 다정한 멘트 딱 한 문장 (밤이나 새벽이면 편안한 밤/숙면 인사를 건넬 것)\n"
             f"2. 상세브리핑: 기상캐스터처럼 현재 시간대({time_context})에 어울리는 다정하고 전문적인 날씨 브리핑 3~4문장\n\n"

@@ -196,7 +196,7 @@ def get_current_weather(lat: float, lon: float):
         desc = "흐림"; icon = f"04{suffix}"
 
     return {
-        "city": "기상청 실시간",
+        "city": "기상청 동네예보",
         "temp": round(temp),
         "feels_like": round(feels_like),
         "temp_max": temp_max,
@@ -285,13 +285,21 @@ def get_weekly_forecast(lat: float, lon: float):
         )
         if res.status_code != 200: return []
         data = res.json()
+        timezone_offset = int(data.get("city", {}).get("timezone", 9 * 60 * 60))
+        local_timezone = timezone(timedelta(seconds=timezone_offset))
         
         daily_data = {}
         for item in data.get("list", []):
             dt_txt = item.get("dt_txt", "")
             if not dt_txt: continue
             
-            date_str = dt_txt.split(" ")[0]
+            forecast_timestamp = item.get("dt")
+            if forecast_timestamp is not None:
+                local_forecast_time = datetime.fromtimestamp(forecast_timestamp, local_timezone)
+            else:
+                utc_forecast_time = datetime.strptime(dt_txt, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+                local_forecast_time = utc_forecast_time.astimezone(local_timezone)
+            date_str = local_forecast_time.strftime("%Y-%m-%d")
             main_data = item.get("main", {})
             temp = main_data.get("temp", 20)
             pop = item.get("pop", 0)
@@ -310,8 +318,7 @@ def get_weekly_forecast(lat: float, lon: float):
             daily_data[date_str]["hums"].append(humidity)
         
         result = []
-        kst = timezone(timedelta(hours=9))
-        today_str = datetime.now(kst).strftime("%Y-%m-%d")
+        today_str = datetime.now(local_timezone).strftime("%Y-%m-%d")
         days_kr = ["월", "화", "수", "목", "금", "토", "일"]
         
         for d_str, d_info in daily_data.items():
@@ -384,8 +391,11 @@ def get_air_quality(lat: float, lon: float):
         data = res.json()
         if "list" not in data or len(data["list"]) == 0: return {"pm25": 0, "pm10": 0, "level": "점검중"}
         item = data["list"][0]
-        pm25 = item.get("components", {}).get("pm2_5", 0)
-        pm10 = item.get("components", {}).get("pm10", 0)
+        components = item.get("components", {})
+        pm25 = components.get("pm2_5")
+        pm10 = components.get("pm10")
+        if pm25 is None:
+            return {"pm25": None, "pm10": round(pm10) if pm10 is not None else None, "level": "점검중"}
         if pm25 <= 15: level = "좋음"
         elif pm25 <= 35: level = "보통"
         elif pm25 <= 75: level = "나쁨"
