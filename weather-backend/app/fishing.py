@@ -102,7 +102,11 @@ def get_fishing_summary(place: str, region: str, lat: float = 33.96194, lon: flo
     region_name = ""
     try:
         if not region:
-            available_regions = get_fishing_regions()
+            try:
+                available_regions = get_fishing_regions()
+            except requests.RequestException:
+                # The region catalog is optional; use the verified Jeju-wide zone if unavailable.
+                available_regions = []
             matched = next((item for item in available_regions if "제주" in item.get("REG_NAME", "") and "앞바다" in item.get("REG_NAME", "")), None)
             if matched is None:
                 matched = next((item for item in available_regions if "제주" in item.get("REG_NAME", "")), None)
