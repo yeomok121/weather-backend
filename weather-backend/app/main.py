@@ -112,6 +112,16 @@ def _auth_signing_key() -> bytes:
         raise HTTPException(status_code=503, detail="서버 인증 설정이 완료되지 않았습니다")
     return secret.encode("utf-8")
 
+@app.get("/api/auth/status")
+def auth_status():
+    """Expose whether authentication is configured without revealing its secret."""
+    secret = os.getenv("AUTH_SECRET_KEY", "")
+    return {
+        "configured": len(secret) >= 32,
+        "minimum_length": 32,
+        "message": "인증을 사용할 수 있습니다" if len(secret) >= 32 else "서버 인증 설정이 완료되지 않았습니다",
+    }
+
 def _encode_token_part(value: bytes) -> str:
     return base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
 
@@ -177,6 +187,8 @@ def _ensure_user_favorites_table(cur):
 
 @app.post("/api/signup")
 def signup(req: SignUpRequest):
+    # Do not create accounts that cannot sign in because the token key is missing.
+    _auth_signing_key()
     if len(req.username) < 4 or len(req.password) < 4 or not req.name.strip():
         raise HTTPException(status_code=400, detail="입력값을 확인해주세요")
 
