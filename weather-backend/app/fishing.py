@@ -9,6 +9,11 @@ import requests
 KHOA_BASE = "https://apis.data.go.kr/1192136"
 KMA_BASE = "https://apihub.kma.go.kr/api/typ01/url"
 SEOUL = timezone(timedelta(hours=9))
+KNOWN_REGION_NAMES = {
+    "12D00000": "제주도 전해상",
+    "12A20100": "서해중부앞바다",
+    "12B20100": "남해동부앞바다",
+}
 
 
 def _fetch(url: str, params: dict, timeout: int = 15) -> requests.Response:
@@ -99,7 +104,7 @@ def get_fishing_summary(place: str, region: str, lat: float = 33.96194, lon: flo
     buoy = []
     tide = None
 
-    region_name = ""
+    region_name = KNOWN_REGION_NAMES.get(region, "")
     try:
         if not region:
             try:
