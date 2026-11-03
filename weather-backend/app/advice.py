@@ -125,16 +125,16 @@ def make_mountain_fallback(current: dict, forecast: list, mountain_info: dict) -
     elif wind >= 7:
         one_line = f"💨 {name} 능선에 {wind}m/s의 강한 바람이 불어요! 정상 체류 시 저체온증 예방을 위해 방풍 의류가 필수입니다."
     elif humidity >= 80 and wind <= 3:
-        one_line = f"🌊 {name} 정상 습도가 높아 이른 아침 멋진 운해(구름바다)가 기대돼요! 안전 하산 시각({safe_descent})을 꼭 지켜주세요."
+        one_line = f"🌊 {name} 정상은 운해 형성 조건 일부에 해당하지만 실제 운해와 시야는 현장 상황을 확인하세요. 권장 하산 시작 시각({safe_descent})도 지켜주세요."
     else:
-        one_line = f"🧗 {name}({peak}, {elevation}m) 산행하기 좋은 기상이에요! 평지보다 {summit_drop}°C 낮으니 겹쳐 입을 겉옷을 배낭에 챙기세요."
+        one_line = f"🧗 {name}({peak}, {elevation}m) 정상은 평지보다 약 {summit_drop}°C 낮게 예상됩니다. 정상 체감온도와 바람을 확인하고 보온·방풍 의류를 준비하세요."
 
     view_comment = (
-        "습도가 높고 바람이 약해 일출 전후로 장엄한 운해(구름바다)를 만날 가능성이 높으나 안개(곰탕)로 시야가 좁아질 수 있습니다."
-        if humidity >= 82 else
-        "기온이 영하권이고 습도가 높아 나뭇가지에 피어난 아름다운 상고대(눈꽃) 절경을 기대할 수 있습니다."
+        "습도가 높고 바람이 약해 운해가 형성될 수 있는 조건이지만, 안개가 짙으면 오히려 시야가 제한될 수 있습니다."
+        if humidity >= 82 and wind <= 3.5 else
+        "기온과 습도상 상고대가 형성될 여지는 있으나, 실제 결빙·상고대 여부는 현장 관측이 필요합니다."
         if temp <= -2 and humidity >= 75 else
-        "대기가 비교적 맑고 시정이 좋아 정상에서 탁 트인 파노라마 조망(뻥뷰)을 감상하기 좋습니다."
+        "현재 제공된 날씨 조건만으로는 조망 환경을 참고 수준으로 판단할 수 있으며, 실제 시정과 운량 자료는 별도 확인이 필요합니다."
     )
 
     briefing = (
@@ -163,7 +163,13 @@ def get_ai_contents(current: dict, forecast: list, air_quality: dict, mountain_i
     temp = round(current.get("temp", 20))
     desc = current.get("description", "맑음")
     mode_tag = "MTN" if mountain_info else "CITY"
-    cache_key = f"{mode_tag}_{city}_{hour}_{desc}_{temp}"
+    feels_like = round(current.get("feels_like", temp))
+    wind = round(float(current.get("wind_speed", 0) or 0), 1)
+    humidity = int(current.get("humidity", 50) or 50)
+    max_pop = int(max((f.get("pop", 0) for f in forecast[:6]), default=0) * 100) if forecast else 0
+    pm_value = (air_quality or {}).get("pm25", 0)
+    descent_key = (mountain_info or {}).get("safe_descent_time", "")
+    cache_key = f"{mode_tag}_{city}_{hour}_{desc}_{temp}_{feels_like}_{wind}_{humidity}_{max_pop}_{pm_value}_{descent_key}"
 
     now_ts = time.time()
     if cache_key in AI_CACHE:
@@ -171,11 +177,7 @@ def get_ai_contents(current: dict, forecast: list, air_quality: dict, mountain_i
         if now_ts - saved_time < CACHE_TTL:
             return saved_data
 
-    feels_like = round(current.get("feels_like", temp))
-    wind = current.get("wind_speed", 0)
-    humidity = current.get("humidity", 50)
     pm = air_quality.get("level", "보통") if air_quality else "보통"
-    max_pop = int(max((f.get("pop", 0) for f in forecast[:6]), default=0) * 100) if forecast else 0
 
     if mountain_info:
         m_name = mountain_info.get("name", "산")
@@ -194,7 +196,8 @@ def get_ai_contents(current: dict, forecast: list, air_quality: dict, mountain_i
             f"산행 참고 팁: {m_tip}\n\n"
             "마크다운(**, ## 등)은 절대 사용하지 말고 평문과 이모지만 사용해 아래 두 항목을 작성해주세요.\n"
             "1. 한줄멘트: 등산객에게 가장 중요한 핵심 포인트(정상 체감추위/결빙/바위미끄럼/운해·조망/하산시간 중 1~2개)를 짚어주는 강렬하고 실용적인 한 문장\n"
-            "2. 상세브리핑: ①들머리 대비 정상 기온·바람 체감 분석 ②오늘 조망 확률(운해/상고대/쾌청 뻥뷰/안개 곰탕 여부) ③지형 특성을 고려한 노면 위험도 및 레이어링·장비(스틱, 아이젠, 방풍재킷 등) 추천과 안전 하산 시각 안내를 포함해 3~4문장으로 전문성 있게 작성\n\n"
+            "2. 상세브리핑: ①들머리 대비 정상 기온·바람 체감 분석 ②조망 환경 참고 판단(운해/상고대/안개 가능 조건) ③지형 특성을 고려한 노면 위험도 및 장비 추천 ④권장 하산 시작 시각 안내를 포함해 3~4문장으로 작성\n"
+            "주의: 시정·운량·운고·노면 실측 자료가 없으면 조망이나 운해를 확률 또는 확정 사실처럼 표현하지 말고, 기상 조건에 따른 참고 추정이라고 밝혀주세요.\n\n"
             "반드시 아래 출력 형식을 정확히 지켜서 답변해주세요:\n"
             "한줄: [여기에 한줄멘트 작성]\n"
             "상세: [여기에 상세브리핑 작성]"

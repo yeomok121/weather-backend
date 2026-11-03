@@ -598,10 +598,23 @@ def get_mountain_weather(mountain_name: str):
     summit_wind = round(max(1.2, base_weather["wind_speed"] * 1.6 + (elevation / 1000.0)), 1)
     summit_humidity = min(100, int(base_weather.get("humidity", 50) + 8))
 
+    # 산림청 관측값은 항목별로 존재하는 경우에만 해당 추정값을 대체합니다.
+    source_as_of = datetime.now(timezone(timedelta(hours=9))).isoformat(timespec="minutes")
+    weather_sources = {
+        "temperature": "고도 보정 추정값",
+        "wind": "고도·지형 보정 추정값",
+        "humidity": "고도 보정 추정값",
+    }
     if forest_obs:
-        summit_temp = round(forest_obs["temp"])
-        if forest_obs.get("wind_speed") is not None: summit_wind = round(forest_obs["wind_speed"], 1)
-        if forest_obs.get("humidity") is not None: summit_humidity = forest_obs["humidity"]
+        if forest_obs.get("temp") is not None:
+            summit_temp = round(forest_obs["temp"])
+            weather_sources["temperature"] = "산림청 산악기상 관측 응답값"
+        if forest_obs.get("wind_speed") is not None:
+            summit_wind = round(forest_obs["wind_speed"], 1)
+            weather_sources["wind"] = "산림청 산악기상 관측 응답값"
+        if forest_obs.get("humidity") is not None:
+            summit_humidity = forest_obs["humidity"]
+            weather_sources["humidity"] = "산림청 산악기상 관측 응답값"
 
     wind_chill_drop = round(summit_wind * 0.7) if summit_temp <= 15 else 0
     summit_feels_like = summit_temp - wind_chill_drop
@@ -660,7 +673,11 @@ def get_mountain_weather(mountain_name: str):
             "cctv_url": m_info.get("cctv_url", "https://www.knps.or.kr/portal/main/contents.do?menuNo=8000159"),
             "base_temp": base_temp,
             "summit_drop": summit_drop,
-            "safe_descent_time": safe_descent_time
+            "safe_descent_time": safe_descent_time,
+            "safe_descent_time_label": "권장 하산 시작 시각(일몰 2시간 전 기준)",
+            "weather_sources": weather_sources,
+            "data_as_of": source_as_of,
+            "data_note": "정상 관측값이 없는 항목은 평지 예보와 고도 보정으로 추정합니다."
         },
         "current": {
             "city": f"{mountain_name} ({m_info['peak']})",
@@ -676,6 +693,10 @@ def get_mountain_weather(mountain_name: str):
             "sunrise": base_weather.get("sunrise", "06:30"),
             "sunset": base_weather.get("sunset", "17:30"),
             "safe_descent_time": safe_descent_time,
+            "safe_descent_time_label": "권장 하산 시작 시각(일몰 2시간 전 기준)",
+            "weather_sources": weather_sources,
+            "data_as_of": source_as_of,
+            "data_note": "정상 관측값이 없는 항목은 평지 예보와 고도 보정으로 추정합니다.",
             "temp_max": round(apply_mountain_lapse_rate(base_weather["temp_max"], elevation)),
             "temp_min": round(apply_mountain_lapse_rate(base_weather["temp_min"], elevation))
         },
