@@ -5,6 +5,8 @@ import json
 import time
 import threading
 import concurrent.futures
+import asyncio
+from contextlib import asynccontextmanager
 from contextvars import copy_context
 from app.weather_diagnostics import (
     RequestLogMiddleware, log_environment_status, run_weather_task,
@@ -33,7 +35,38 @@ from app.fishing import get_fishing_summary
 
 load_dotenv()
 
-app = FastAPI()
+# --- Aiven DB 유휴 상태(자동 종료) 방지 코드 시작 ---
+async def keep_db_alive():
+    """5분마다 DB에 가벼운 쿼리를 보내 서버가 꺼지는 것을 방지합니다."""
+    def ping_db():
+        conn = get_conn()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT 1")
+        finally:
+            conn.close()
+
+    while True:
+        try:
+            # FastAPI 이벤트 루프가 멈추지 않도록 백그라운드 스레드에서 실행
+            await asyncio.to_thread(ping_db)
+            print("DB 자동 종료 방지: 핑(SELECT 1) 전송 완료")
+        except Exception as e:
+            print(f"DB 핑 전송 실패: {e}")
+        
+        await asyncio.sleep(300)  # 300초(5분)마다 반복
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # 서버 켜질 때 핑 함수 시작
+    keep_alive_task = asyncio.create_task(keep_db_alive())
+    yield
+    # 서버 꺼질 때 핑 함수 종료
+    keep_alive_task.cancel()
+# --- Aiven DB 유휴 상태 방지 코드 끝 ---
+
+# 앱 실행 시 lifespan 등록
+app = FastAPI(lifespan=lifespan)
 log_environment_status()
 
 app.add_middleware(
