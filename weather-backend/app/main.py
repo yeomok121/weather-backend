@@ -5,6 +5,11 @@ import json
 import time
 import threading
 import concurrent.futures
+from contextvars import copy_context
+from app.weather_diagnostics import (
+    RequestLogMiddleware, log_environment_status, run_weather_task,
+    log_error, request_id_var,
+)
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Header
 import requests
@@ -29,6 +34,7 @@ from app.fishing import get_fishing_summary
 load_dotenv()
 
 app = FastAPI()
+log_environment_status()
 
 app.add_middleware(
     CORSMiddleware,
@@ -36,6 +42,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+app.add_middleware(RequestLogMiddleware)
 
 @app.get("/")
 def hello():
@@ -45,17 +53,18 @@ def hello():
 def summary(lat: float, lon: float):
     try:
         with concurrent.futures.ThreadPoolExecutor() as executor:
-            f_current = executor.submit(get_current_weather, lat, lon)
-            f_hourly = executor.submit(get_hourly_forecast, lat, lon)
-            f_aqi = executor.submit(get_air_quality, lat, lon)
-            f_weekly = executor.submit(get_weekly_forecast, lat, lon)
+            f_current = executor.submit(copy_context().run, run_weather_task, "current", get_current_weather, lat, lon)
+            f_hourly = executor.submit(copy_context().run, run_weather_task, "hourly", get_hourly_forecast, lat, lon)
+            f_aqi = executor.submit(copy_context().run, run_weather_task, "air_quality", get_air_quality, lat, lon)
+            f_weekly = executor.submit(copy_context().run, run_weather_task, "weekly", get_weekly_forecast, lat, lon)
 
             current = f_current.result()
             forecast = f_hourly.result()
             air_quality = f_aqi.result()
             weekly = f_weekly.result()
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"서버 오류: {str(e)}")
+        log_error("summary_failed", e)
+        raise HTTPException(status_code=502, detail=f"날씨 조회 중 오류가 발생했습니다. request_id={request_id_var.get()}") from None
     
     return {
         "current": current,

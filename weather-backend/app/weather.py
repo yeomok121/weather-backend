@@ -1,5 +1,6 @@
 import os
 import requests
+from app.weather_diagnostics import logged_get, logged_json, log_error, emit
 import math
 import concurrent.futures
 from datetime import datetime, timedelta, timezone
@@ -65,12 +66,13 @@ def get_yesterday_temp(lat: float, lon: float, nx: int, ny: int) -> float | None
             "pageNo": "1", "numOfRows": "300", "dataType": "JSON",
             "base_date": y_date_str, "base_time": "0200", "nx": nx, "ny": ny
         }
-        res = requests.get(url, params=params, timeout=3)
-        items = res.json().get("response", {}).get("body", {}).get("items", {}).get("item", [])
+        res = logged_get(url, params=params, timeout=3)
+        items = logged_json(res).get("response", {}).get("body", {}).get("items", {}).get("item", [])
         for item in items:
             if item.get("fcstDate") == y_date_str and item.get("fcstTime") == target_hour_str and item.get("category") == "TMP":
                 return float(item.get("fcstValue"))
-    except Exception:
+    except Exception as diagnostic_exc:
+        log_error("weather_fallback", diagnostic_exc, function="get_yesterday_temp")
         pass
 
     try:
@@ -81,9 +83,9 @@ def get_yesterday_temp(lat: float, lon: float, nx: int, ny: int) -> float | None
             "past_days": 1, "forecast_days": 1,
             "timezone": "Asia/Seoul"
         }
-        om_res = requests.get(om_url, params=om_params, timeout=3)
+        om_res = logged_get(om_url, params=om_params, timeout=3)
         if om_res.status_code == 200:
-            hourly = om_res.json().get("hourly", {})
+            hourly = logged_json(om_res).get("hourly", {})
             times = hourly.get("time", [])
             temps = hourly.get("temperature_2m", [])
             target_iso = yesterday.strftime("%Y-%m-%dT%H:00")
@@ -91,7 +93,8 @@ def get_yesterday_temp(lat: float, lon: float, nx: int, ny: int) -> float | None
                 idx = times.index(target_iso)
                 if idx < len(temps) and temps[idx] is not None:
                     return float(temps[idx])
-    except Exception:
+    except Exception as diagnostic_exc:
+        log_error("weather_fallback", diagnostic_exc, function="get_yesterday_temp")
         pass
     return None
 
@@ -110,10 +113,14 @@ def get_current_weather(lat: float, lon: float):
     }
     
     try:
-        res = requests.get(url, params=params, timeout=5)
-        items = res.json().get("response", {}).get("body", {}).get("items", {}).get("item", [])
-    except Exception:
+        res = logged_get(url, params=params, timeout=5)
+        items = logged_json(res).get("response", {}).get("body", {}).get("items", {}).get("item", [])
+    except Exception as diagnostic_exc:
+        log_error("weather_fallback", diagnostic_exc, function="get_current_weather")
         items = []
+
+    if not items:
+        emit("weather_default_values_used", function="get_current_weather", reason="no_kma_items")
 
     temp = 20.0; humidity = 50; wind_speed = 0.0; sky = "1"; pty = "0"
     tmx = None; tmn = None
@@ -155,13 +162,13 @@ def get_current_weather(lat: float, lon: float):
     is_day = True 
 
     try:
-        owm_res = requests.get(
+        owm_res = logged_get(
             f"{BASE}/weather",
             params={"lat": lat, "lon": lon, "appid": OWM_API_KEY, "units": "metric"},
             timeout=5
         )
         if owm_res.status_code == 200:
-            owm_data = owm_res.json()
+            owm_data = logged_json(owm_res)
             sys_data = owm_data.get("sys", {})
             now_ts = now.timestamp()
             
@@ -173,7 +180,8 @@ def get_current_weather(lat: float, lon: float):
                     
             if "main" in owm_data and "feels_like" in owm_data["main"]:
                 feels_like = round(owm_data["main"]["feels_like"], 1)
-    except Exception:
+    except Exception as diagnostic_exc:
+        log_error("weather_fallback", diagnostic_exc, function="get_current_weather")
         is_day = 6 <= now.hour < 18
 
     yesterday_temp = get_yesterday_temp(lat, lon, nx, ny)
@@ -222,9 +230,10 @@ def get_hourly_forecast(lat: float, lon: float, count: int = 24):
     }
     
     try:
-        res = requests.get(url, params=params, timeout=5)
-        items = res.json().get("response", {}).get("body", {}).get("items", {}).get("item", [])
-    except Exception:
+        res = logged_get(url, params=params, timeout=5)
+        items = logged_json(res).get("response", {}).get("body", {}).get("items", {}).get("item", [])
+    except Exception as diagnostic_exc:
+        log_error("weather_fallback", diagnostic_exc, function="get_hourly_forecast")
         items = []
 
     kst = timezone(timedelta(hours=9))
@@ -278,13 +287,13 @@ def get_hourly_forecast(lat: float, lon: float, count: int = 24):
 
 def get_weekly_forecast(lat: float, lon: float):
     try:
-        res = requests.get(
+        res = logged_get(
             f"{BASE}/forecast",
             params={"lat": lat, "lon": lon, "appid": OWM_API_KEY, "units": "metric", "lang": "kr"},
             timeout=5
         )
         if res.status_code != 200: return []
-        data = res.json()
+        data = logged_json(res)
         timezone_offset = int(data.get("city", {}).get("timezone", 9 * 60 * 60))
         local_timezone = timezone(timedelta(seconds=timezone_offset))
         
@@ -325,7 +334,8 @@ def get_weekly_forecast(lat: float, lon: float):
             try:
                 d_obj = datetime.strptime(d_str, "%Y-%m-%d")
                 weekday = days_kr[d_obj.weekday()]
-            except Exception:
+            except Exception as diagnostic_exc:
+                log_error("weather_fallback", diagnostic_exc, function="get_weekly_forecast")
                 continue
             
             icons = d_info["icons"]
@@ -365,30 +375,32 @@ def get_weekly_forecast(lat: float, lon: float):
                 "humidity": round(avg_hum)
             })
         return result[:5]
-    except Exception:
+    except Exception as diagnostic_exc:
+        log_error("weather_fallback", diagnostic_exc, function="get_weekly_forecast")
         return []
 
 def search_location(q: str):
     try:
-        res = requests.get(
+        res = logged_get(
             "https://api.openweathermap.org/geo/1.0/direct",
             params={"q": q, "limit": 1, "appid": OWM_API_KEY}, timeout=5)
         if res.status_code != 200: return None
-        data = res.json()
+        data = logged_json(res)
         if not isinstance(data, list) or len(data) == 0: return None
         local_names = data[0].get("local_names", {})
         kor_name = local_names.get("ko", data[0].get("name", q))
         return {"name": kor_name, "lat": data[0].get("lat", 0), "lon": data[0].get("lon", 0)}
-    except Exception:
+    except Exception as diagnostic_exc:
+        log_error("weather_fallback", diagnostic_exc, function="search_location")
         return None
 
 def get_air_quality(lat: float, lon: float):
     try:
-        res = requests.get(
+        res = logged_get(
             f"{BASE}/air_pollution",
             params={"lat": lat, "lon": lon, "appid": OWM_API_KEY}, timeout=5)
         if res.status_code != 200: return {"pm25": 0, "pm10": 0, "level": "점검중"}
-        data = res.json()
+        data = logged_json(res)
         if "list" not in data or len(data["list"]) == 0: return {"pm25": 0, "pm10": 0, "level": "점검중"}
         item = data["list"][0]
         components = item.get("components", {})
@@ -401,7 +413,8 @@ def get_air_quality(lat: float, lon: float):
         elif pm25 <= 75: level = "나쁨"
         else: level = "매우나쁨"
         return {"pm25": round(pm25), "pm10": round(pm10), "level": level}
-    except Exception:
+    except Exception as diagnostic_exc:
+        log_error("weather_fallback", diagnostic_exc, function="get_air_quality")
         return {"pm25": 0, "pm10": 0, "level": "점검중"}
 
 MOUNTAINS_DB = {
