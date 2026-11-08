@@ -245,7 +245,10 @@ def get_hourly_forecast(lat: float, lon: float, count: int = 24):
         if ftime < now_str: continue
             
         if ftime not in forecast_dict:
-            forecast_dict[ftime] = {"temp": 0.0, "sky": "1", "pty": "0", "pop": 0.0}
+            forecast_dict[ftime] = {
+                "temp": 0.0, "sky": "1", "pty": "0", "pop": 0.0,
+                "wind_speed": None, "humidity": None,
+            }
         
         cat = item["category"]
         val = item["fcstValue"]
@@ -253,6 +256,8 @@ def get_hourly_forecast(lat: float, lon: float, count: int = 24):
         elif cat == "SKY": forecast_dict[ftime]["sky"] = str(val)
         elif cat == "PTY": forecast_dict[ftime]["pty"] = str(val)
         elif cat == "POP": forecast_dict[ftime]["pop"] = float(val) / 100.0
+        elif cat == "WSD": forecast_dict[ftime]["wind_speed"] = float(val)
+        elif cat == "REH": forecast_dict[ftime]["humidity"] = float(val)
         
     result = []
     sorted_times = sorted(forecast_dict.keys())[:count]
@@ -281,7 +286,9 @@ def get_hourly_forecast(lat: float, lon: float, count: int = 24):
         
         result.append({
             "time": f"{hour_num}시", "temp": round(t),
-            "pop": f_data["pop"], "description": desc, "icon": icon
+            "pop": f_data["pop"], "description": desc, "icon": icon,
+            "wind_speed": round(f_data["wind_speed"], 1) if f_data["wind_speed"] is not None else None,
+            "humidity": round(f_data["humidity"]) if f_data["humidity"] is not None else None,
         })
     return result
 
@@ -647,6 +654,10 @@ def get_mountain_weather(mountain_name: str):
     mountain_hourly = []
     for h in base_hourly:
         m_h_temp = apply_mountain_lapse_rate(h["temp"], elevation)
+        h_wind = h.get("wind_speed")
+        m_h_wind = round(max(1.2, h_wind * 1.6 + (elevation / 1000.0)), 1) if h_wind is not None else None
+        h_humidity = h.get("humidity")
+        m_h_humidity = min(100, int(h_humidity + 8)) if h_humidity is not None else None
         
         # 💡 [핵심 수정] 산악 시간대별 예보에서도 영하+강수확률 30% 이상이면 비를 눈으로 변환
         m_icon = h["icon"]
@@ -656,8 +667,10 @@ def get_mountain_weather(mountain_name: str):
                 
         mountain_hourly.append({
             "time": h["time"], "temp": round(m_h_temp), "pop": h["pop"],
-            "description": "눈" if m_icon.startswith("13") else h["description"], 
-            "icon": m_icon
+            "description": "눈" if m_icon.startswith("13") else h["description"],
+            "icon": m_icon,
+            "wind_speed": m_h_wind,
+            "humidity": m_h_humidity,
         })
 
     mountain_weekly = []
