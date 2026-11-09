@@ -195,13 +195,13 @@ def auth_status():
 def _encode_token_part(value: bytes) -> str:
     return base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
 
-def _create_access_token(username: str) -> str:
-    payload = json.dumps({"sub": username, "exp": int(time.time()) + AUTH_TOKEN_TTL_SECONDS}, separators=(",", ":")).encode("utf-8")
+def _create_access_token(username: str, version: int = 0) -> str:
+    payload = json.dumps({"sub": username, "ver": version, "exp": int(time.time()) + AUTH_TOKEN_TTL_SECONDS}, separators=(",", ":")).encode("utf-8")
     encoded_payload = _encode_token_part(payload)
     signature = hmac.new(_auth_signing_key(), encoded_payload.encode("ascii"), "sha256").digest()
     return f"{encoded_payload}.{_encode_token_part(signature)}"
 
-def _decode_access_token(authorization: str | None) -> str:
+def _decode_access_token(authorization: str | None, include_payload: bool = False):
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="로그인이 필요합니다")
     try:
@@ -217,19 +217,46 @@ def _decode_access_token(authorization: str | None) -> str:
         username = payload.get("sub")
         if not isinstance(username, str) or not username:
             raise ValueError("invalid subject")
-        return username
+        return payload if include_payload else username
     except HTTPException:
         raise
     except Exception:
         raise HTTPException(status_code=401, detail="로그인 정보가 만료되었거나 올바르지 않습니다")
 
 def _get_token_user(cur, authorization: str | None):
-    username = _decode_access_token(authorization)
-    cur.execute("SELECT id, username, name FROM users WHERE username = %s", (username,))
+    payload = _decode_access_token(authorization, include_payload=True)
+    _ensure_admin_tables(cur)
+    cur.execute("SELECT u.id, u.username, u.name, COALESCE(m.suspended, 0) AS suspended, COALESCE(m.token_version, 0) AS token_version, COALESCE(m.role, 'member') AS role FROM users u LEFT JOIN admin_user_metadata m ON m.user_id = u.id WHERE u.username = %s", (payload['sub'],))
     user = cur.fetchone()
     if not user:
         raise HTTPException(status_code=401, detail="계정을 확인할 수 없습니다. 다시 로그인해주세요")
+    if user['suspended'] or payload.get('ver', 0) != user['token_version']:
+        raise HTTPException(status_code=401, detail="계정 상태가 변경되었습니다. 다시 로그인해주세요")
     return user
+
+_admin_schema_ready = False
+_admin_schema_lock = threading.Lock()
+
+def _ensure_admin_tables(cur):
+    global _admin_schema_ready
+    if _admin_schema_ready:
+        return
+    with _admin_schema_lock:
+        if _admin_schema_ready:
+            return
+        cur.execute('''CREATE TABLE IF NOT EXISTS admin_user_metadata (
+            user_id INT NOT NULL PRIMARY KEY, role VARCHAR(24) NOT NULL DEFAULT 'member',
+            suspended TINYINT(1) NOT NULL DEFAULT 0, token_version INT NOT NULL DEFAULT 0,
+            registered_at TIMESTAMP NULL DEFAULT NULL,
+            CONSTRAINT fk_admin_metadata_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4''')
+        cur.execute('''CREATE TABLE IF NOT EXISTS admin_audit_log (
+            id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY, actor VARCHAR(120) NOT NULL,
+            action VARCHAR(40) NOT NULL, target_id INT NULL, target_username VARCHAR(120) NOT NULL,
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            KEY idx_admin_audit_target (target_id, created_at)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4''')
+        _admin_schema_ready = True
 
 def _ensure_user_favorites_table(cur):
     global _favorites_schema_ready
@@ -365,6 +392,7 @@ def signup(req: SignUpRequest):
     conn = get_conn()
     try:
         with conn.cursor() as cur:
+            _ensure_admin_tables(cur)
             cur.execute("SELECT id FROM users WHERE username = %s", (req.username,))
             if cur.fetchone():
                 raise HTTPException(status_code=409, detail="이미 사용 중인 아이디입니다")
@@ -372,6 +400,8 @@ def signup(req: SignUpRequest):
                 "INSERT INTO users (username, password_hash, name) VALUES (%s, %s, %s)",
                 (req.username, hashed, req.name),
             )
+            user_id = cur.lastrowid
+            cur.execute("INSERT INTO admin_user_metadata (user_id, registered_at) VALUES (%s, CURRENT_TIMESTAMP)", (user_id,))
         conn.commit()
     finally:
         conn.close()
@@ -382,18 +412,21 @@ def login(req: LoginRequest):
     conn = get_conn()
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT * FROM users WHERE username = %s", (req.username,))
+            _ensure_admin_tables(cur)
+            cur.execute("SELECT u.*, COALESCE(m.suspended, 0) AS suspended, COALESCE(m.token_version, 0) AS token_version FROM users u LEFT JOIN admin_user_metadata m ON m.user_id = u.id WHERE u.username = %s", (req.username,))
             user = cur.fetchone()
     finally:
         conn.close()
 
     if not user or len(req.password.encode("utf-8")) > 72 or not bcrypt.checkpw(req.password.encode("utf-8"), user["password_hash"].encode("utf-8")):
         raise HTTPException(status_code=401, detail="아이디 또는 비밀번호가 올바르지 않습니다")
+    if user['suspended']:
+        raise HTTPException(status_code=403, detail="이용이 정지된 계정입니다. 관리자에게 문의해주세요")
     return {
         "message": "로그인 성공",
         "name": user["name"],
         "username": user["username"],
-        "access_token": _create_access_token(user["username"]),
+        "access_token": _create_access_token(user["username"], user['token_version']),
         "token_type": "bearer",
         "expires_in": AUTH_TOKEN_TTL_SECONDS,
     }
@@ -929,6 +962,11 @@ def _verify_user(cur, username: str, password: str):
     user = cur.fetchone()
     if not user or len(password.encode("utf-8")) > 72 or not bcrypt.checkpw(password.encode("utf-8"), user["password_hash"].encode("utf-8")):
         raise HTTPException(status_code=401, detail="비밀번호가 올바르지 않습니다")
+    _ensure_admin_tables(cur)
+    cur.execute("SELECT suspended FROM admin_user_metadata WHERE user_id = %s", (user['id'],))
+    metadata = cur.fetchone()
+    if metadata and metadata['suspended']:
+        raise HTTPException(status_code=403, detail="이용이 정지된 계정입니다")
     return user
 
 class UpdateUserRequest(BaseModel):
@@ -995,44 +1033,71 @@ def reset_password(req: ResetPasswordRequest):
         conn.close()
     return {"message": "비밀번호가 변경되었습니다"}
 
-def require_admin(x_admin_password: str | None):
+def require_admin(x_admin_password: str | None, authorization: str | None = None, scope: str = 'admin'):
+    if authorization:
+        conn = get_conn()
+        try:
+            with conn.cursor() as cur:
+                user = _get_token_user(cur, authorization)
+                allowed = {'superadmin': {'admin', 'members', 'notices', 'system'}, 'member_manager': {'admin', 'members'}, 'notice_manager': {'admin', 'notices'}}
+                if scope not in allowed.get(user['role'], set()):
+                    raise HTTPException(status_code=403, detail='관리자 권한이 없습니다')
+                return {'name': user['username'], 'role': user['role']}
+        finally:
+            conn.close()
     expected = os.getenv("ADMIN_PASSWORD")
     if (not expected or not x_admin_password
             or not hmac.compare_digest(x_admin_password.encode("utf-8"), expected.encode("utf-8"))):
         raise HTTPException(status_code=401, detail="관리자 인증에 실패했습니다")
+    return {'name': '공용 관리자 비밀번호', 'role': 'superadmin'}
 
 class AdminUserUpdate(BaseModel):
     username: str
     name: str
     password: str | None = None
 
+class AdminUserState(BaseModel):
+    suspended: bool | None = None
+    role: str | None = None
+
+def _require_manage_target(cur, actor, user_id):
+    cur.execute("SELECT u.username, COALESCE(m.role, 'member') AS role FROM users u LEFT JOIN admin_user_metadata m ON m.user_id = u.id WHERE u.id = %s FOR UPDATE", (user_id,))
+    target = cur.fetchone()
+    if not target:
+        raise HTTPException(status_code=404, detail='회원을 찾을 수 없습니다')
+    if actor['role'] != 'superadmin' and target['role'] != 'member':
+        raise HTTPException(status_code=403, detail='관리자 계정은 최고 관리자만 관리할 수 있습니다')
+    return target
+
 @app.post("/api/admin/verify")
-def admin_verify(x_admin_password: str | None = Header(default=None)):
-    require_admin(x_admin_password)
-    return {"ok": True}
+def admin_verify(x_admin_password: str | None = Header(default=None), authorization: str | None = Header(default=None)):
+    actor = require_admin(x_admin_password, authorization)
+    return {"ok": True, "role": actor['role']}
 
 @app.post("/api/admin/integrations/marine/check")
-def admin_check_marine_integrations(x_admin_password: str | None = Header(default=None)):
+def admin_check_marine_integrations(x_admin_password: str | None = Header(default=None), authorization: str | None = Header(default=None)):
     """Privileged, secret-safe live connectivity test for configured marine APIs."""
-    require_admin(x_admin_password)
+    require_admin(x_admin_password, authorization, 'system')
     return check_marine_integrations()
 
 @app.get("/api/admin/users")
-def admin_list_users(x_admin_password: str | None = Header(default=None)):
-    require_admin(x_admin_password)
+def admin_list_users(x_admin_password: str | None = Header(default=None), authorization: str | None = Header(default=None)):
+    actor = require_admin(x_admin_password, authorization, 'members')
     conn = get_conn()
     try:
         with conn.cursor() as cur:
+            _ensure_admin_tables(cur)
             cur.execute("SHOW COLUMNS FROM users LIKE 'created_at'")
             has_created_at = bool(cur.fetchone())
-            cur.execute("SELECT id, username, name, " + ("created_at" if has_created_at else "NULL AS created_at") + " FROM users ORDER BY id")
+            date_expr = "COALESCE(u.created_at, m.registered_at)" if has_created_at else "m.registered_at"
+            cur.execute("SELECT u.id, u.username, u.name, " + date_expr + " AS created_at, COALESCE(m.suspended, 0) AS suspended, COALESCE(m.role, 'member') AS role FROM users u LEFT JOIN admin_user_metadata m ON m.user_id = u.id ORDER BY u.id")
             return cur.fetchall()
     finally:
         conn.close()
 
 @app.get("/api/admin/users/{user_id}/summary")
-def admin_user_summary(user_id: int, x_admin_password: str | None = Header(default=None)):
-    require_admin(x_admin_password)
+def admin_user_summary(user_id: int, x_admin_password: str | None = Header(default=None), authorization: str | None = Header(default=None)):
+    actor = require_admin(x_admin_password, authorization, 'members')
     conn = get_conn()
     try:
         with conn.cursor() as cur:
@@ -1050,26 +1115,30 @@ def admin_user_summary(user_id: int, x_admin_password: str | None = Header(defau
         conn.close()
 
 @app.post("/api/admin/users")
-def admin_create_user(req: SignUpRequest, x_admin_password: str | None = Header(default=None)):
-    require_admin(x_admin_password)
+def admin_create_user(req: SignUpRequest, x_admin_password: str | None = Header(default=None), authorization: str | None = Header(default=None)):
+    actor = require_admin(x_admin_password, authorization, 'members')
     if len(req.username) < 4 or len(req.password) < 4 or not req.name.strip():
         raise HTTPException(status_code=400, detail="입력값을 확인해주세요")
     conn = get_conn()
     try:
         with conn.cursor() as cur:
+            _ensure_admin_tables(cur)
             cur.execute("SELECT id FROM users WHERE username = %s", (req.username,))
             if cur.fetchone():
                 raise HTTPException(status_code=409, detail="이미 사용 중인 아이디입니다")
             cur.execute("INSERT INTO users (username, password_hash, name) VALUES (%s, %s, %s)",
                         (req.username, _hash_pw(req.password), req.name.strip()))
+            user_id = cur.lastrowid
+            cur.execute("INSERT INTO admin_user_metadata (user_id, registered_at) VALUES (%s, CURRENT_TIMESTAMP)", (user_id,))
+            cur.execute("INSERT INTO admin_audit_log (actor, action, target_id, target_username) VALUES (%s, 'create', %s, %s)", (actor['name'], user_id, req.username))
         conn.commit()
     finally:
         conn.close()
     return {"message": "회원이 추가되었습니다"}
 
 @app.put("/api/admin/users/{user_id}")
-def admin_update_user(user_id: int, req: AdminUserUpdate, x_admin_password: str | None = Header(default=None)):
-    require_admin(x_admin_password)
+def admin_update_user(user_id: int, req: AdminUserUpdate, x_admin_password: str | None = Header(default=None), authorization: str | None = Header(default=None)):
+    actor = require_admin(x_admin_password, authorization, 'members')
     if len(req.username) < 4 or not req.name.strip():
         raise HTTPException(status_code=400, detail="입력값을 확인해주세요")
     if req.password and len(req.password) < 4:
@@ -1077,6 +1146,8 @@ def admin_update_user(user_id: int, req: AdminUserUpdate, x_admin_password: str 
     conn = get_conn()
     try:
         with conn.cursor() as cur:
+            _ensure_admin_tables(cur)
+            target = _require_manage_target(cur, actor, user_id)
             cur.execute("SELECT id FROM users WHERE username = %s AND id <> %s", (req.username, user_id))
             if cur.fetchone():
                 raise HTTPException(status_code=409, detail="이미 사용 중인 아이디입니다")
@@ -1086,24 +1157,70 @@ def admin_update_user(user_id: int, req: AdminUserUpdate, x_admin_password: str 
             else:
                 cur.execute("UPDATE users SET username = %s, name = %s WHERE id = %s",
                             (req.username, req.name.strip(), user_id))
+            if req.password or req.username != target['username']:
+                cur.execute("INSERT INTO admin_user_metadata (user_id, token_version) VALUES (%s, 1) ON DUPLICATE KEY UPDATE token_version = token_version + 1", (user_id,))
+            cur.execute("INSERT INTO admin_audit_log (actor, action, target_id, target_username) VALUES (%s, %s, %s, %s)", (actor['name'], 'update_password' if req.password else 'update', user_id, target['username']))
         conn.commit()
     finally:
         conn.close()
     return {"message": "수정되었습니다"}
 
 @app.delete("/api/admin/users/{user_id}")
-def admin_delete_user(user_id: int, x_admin_password: str | None = Header(default=None)):
-    require_admin(x_admin_password)
+def admin_delete_user(user_id: int, x_admin_password: str | None = Header(default=None), authorization: str | None = Header(default=None)):
+    actor = require_admin(x_admin_password, authorization, 'members')
     conn = get_conn()
     try:
         with conn.cursor() as cur:
+            _ensure_admin_tables(cur)
+            target = _require_manage_target(cur, actor, user_id)
+            if target['username'] == actor['name']:
+                raise HTTPException(status_code=400, detail='현재 관리자 계정은 삭제할 수 없습니다')
             _ensure_user_favorites_table(cur)
             cur.execute("DELETE FROM user_favorites WHERE user_id = %s", (user_id,))
             cur.execute("DELETE FROM users WHERE id = %s", (user_id,))
+            cur.execute("INSERT INTO admin_audit_log (actor, action, target_id, target_username) VALUES (%s, 'delete', %s, %s)", (actor['name'], user_id, target['username']))
         conn.commit()
     finally:
         conn.close()
     return {"message": "삭제되었습니다"}
+
+@app.patch('/api/admin/users/{user_id}/state')
+def admin_user_state(user_id: int, req: AdminUserState, x_admin_password: str | None = Header(default=None), authorization: str | None = Header(default=None)):
+    actor = require_admin(x_admin_password, authorization, 'members')
+    if req.suspended is None and req.role is None:
+        raise HTTPException(status_code=400, detail='변경할 상태를 선택해주세요')
+    if req.role is not None and (actor['role'] != 'superadmin' or req.role not in ('member', 'member_manager', 'notice_manager', 'superadmin')):
+        raise HTTPException(status_code=403, detail='권한 변경은 최고 관리자만 할 수 있습니다')
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            _ensure_admin_tables(cur)
+            target = _require_manage_target(cur, actor, user_id)
+            if target['username'] == actor['name']:
+                raise HTTPException(status_code=400, detail='현재 관리자 계정의 상태나 권한은 변경할 수 없습니다')
+            cur.execute('INSERT INTO admin_user_metadata (user_id) VALUES (%s) ON DUPLICATE KEY UPDATE user_id = user_id', (user_id,))
+            if req.suspended is not None:
+                cur.execute('UPDATE admin_user_metadata SET suspended = %s, token_version = token_version + 1 WHERE user_id = %s', (req.suspended, user_id))
+                cur.execute('INSERT INTO admin_audit_log (actor, action, target_id, target_username) VALUES (%s, %s, %s, %s)', (actor['name'], 'suspend' if req.suspended else 'restore', user_id, target['username']))
+            if req.role is not None:
+                cur.execute('UPDATE admin_user_metadata SET role = %s WHERE user_id = %s', (req.role, user_id))
+                cur.execute('INSERT INTO admin_audit_log (actor, action, target_id, target_username) VALUES (%s, %s, %s, %s)', (actor['name'], 'role:' + req.role, user_id, target['username']))
+        conn.commit()
+        return {'message': '회원 상태가 변경되었습니다'}
+    finally:
+        conn.close()
+
+@app.get('/api/admin/audit')
+def admin_audit(x_admin_password: str | None = Header(default=None), authorization: str | None = Header(default=None)):
+    require_admin(x_admin_password, authorization, 'members')
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            _ensure_admin_tables(cur)
+            cur.execute('SELECT id, actor, action, target_username, created_at FROM admin_audit_log ORDER BY id DESC LIMIT 100')
+            return cur.fetchall()
+    finally:
+        conn.close()
 
 
 # ======================= 공지사항 (MySQL) =======================
@@ -1171,8 +1288,8 @@ def list_notices():
         conn.close()
 
 @app.post("/api/admin/notices")
-def admin_create_notice(req: NoticeRequest, x_admin_password: str | None = Header(default=None)):
-    require_admin(x_admin_password)
+def admin_create_notice(req: NoticeRequest, x_admin_password: str | None = Header(default=None), authorization: str | None = Header(default=None)):
+    require_admin(x_admin_password, authorization, 'notices')
     ntype, title, d = _parse_notice(req)
     conn = get_conn()
     try:
@@ -1186,8 +1303,8 @@ def admin_create_notice(req: NoticeRequest, x_admin_password: str | None = Heade
     return {"message": "공지사항이 등록되었습니다", "id": new_id}
 
 @app.put("/api/admin/notices/{notice_id}")
-def admin_update_notice(notice_id: int, req: NoticeRequest, x_admin_password: str | None = Header(default=None)):
-    require_admin(x_admin_password)
+def admin_update_notice(notice_id: int, req: NoticeRequest, x_admin_password: str | None = Header(default=None), authorization: str | None = Header(default=None)):
+    require_admin(x_admin_password, authorization, 'notices')
     ntype, title, d = _parse_notice(req)
     conn = get_conn()
     try:
@@ -1204,8 +1321,8 @@ def admin_update_notice(notice_id: int, req: NoticeRequest, x_admin_password: st
     return {"message": "수정되었습니다"}
 
 @app.delete("/api/admin/notices/{notice_id}")
-def admin_delete_notice(notice_id: int, x_admin_password: str | None = Header(default=None)):
-    require_admin(x_admin_password)
+def admin_delete_notice(notice_id: int, x_admin_password: str | None = Header(default=None), authorization: str | None = Header(default=None)):
+    require_admin(x_admin_password, authorization, 'notices')
     conn = get_conn()
     try:
         with conn.cursor() as cur:
