@@ -436,6 +436,16 @@ class FavoriteLocation(BaseModel):
     lat: float
     lon: float
 
+@app.get('/api/users/me/role')
+def get_my_role(authorization: str | None = Header(default=None)):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            user = _get_token_user(cur, authorization)
+            return {'role': user['role']}
+    finally:
+        conn.close()
+
 class ReplaceFavoritesRequest(BaseModel):
     favorites: list[FavoriteLocation]
 
