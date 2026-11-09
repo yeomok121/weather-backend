@@ -1023,8 +1023,29 @@ def admin_list_users(x_admin_password: str | None = Header(default=None)):
     conn = get_conn()
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT id, username, name FROM users ORDER BY id")
+            cur.execute("SHOW COLUMNS FROM users LIKE 'created_at'")
+            has_created_at = bool(cur.fetchone())
+            cur.execute("SELECT id, username, name, " + ("created_at" if has_created_at else "NULL AS created_at") + " FROM users ORDER BY id")
             return cur.fetchall()
+    finally:
+        conn.close()
+
+@app.get("/api/admin/users/{user_id}/summary")
+def admin_user_summary(user_id: int, x_admin_password: str | None = Header(default=None)):
+    require_admin(x_admin_password)
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id, username, name FROM users WHERE id = %s", (user_id,))
+            user = cur.fetchone()
+            if not user:
+                raise HTTPException(status_code=404, detail="회원을 찾을 수 없습니다")
+            _ensure_hiking_tables(cur)
+            cur.execute("SELECT COUNT(*) AS total FROM hiking_plans WHERE user_id = %s", (user_id,))
+            plans = cur.fetchone()["total"]
+            cur.execute("SELECT COUNT(*) AS total FROM hiking_party_members WHERE user_id = %s", (user_id,))
+            parties = cur.fetchone()["total"]
+            return {**user, "plan_count": plans, "party_count": parties}
     finally:
         conn.close()
 
