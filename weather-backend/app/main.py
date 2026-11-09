@@ -6,6 +6,8 @@ import time
 import threading
 import concurrent.futures
 import asyncio
+from contextlib import suppress
+from datetime import datetime, timezone
 from contextlib import asynccontextmanager
 from contextvars import copy_context
 from app.weather_diagnostics import (
@@ -14,6 +16,9 @@ from app.weather_diagnostics import (
 )
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Header
+from fastapi.responses import JSONResponse
+from pymysql import err as db_errors
+from app.health import router as health_router, monitor_database
 import requests
 from app.advice import get_ai_contents
 from app.weather import (
@@ -35,39 +40,38 @@ from app.fishing import get_fishing_summary
 
 load_dotenv()
 
-# --- Aiven DB 유휴 상태(자동 종료) 방지 코드 시작 ---
-async def keep_db_alive():
-    """5분마다 DB에 가벼운 쿼리를 보내 서버가 꺼지는 것을 방지합니다."""
-    def ping_db():
-        conn = get_conn()
-        try:
-            with conn.cursor() as cursor:
-                cursor.execute("SELECT 1")
-        finally:
-            conn.close()
-
-    while True:
-        try:
-            # FastAPI 이벤트 루프가 멈추지 않도록 백그라운드 스레드에서 실행
-            await asyncio.to_thread(ping_db)
-            print("DB 자동 종료 방지: 핑(SELECT 1) 전송 완료")
-        except Exception as e:
-            print(f"DB 핑 전송 실패: {e}")
-        
-        await asyncio.sleep(300)  # 300초(5분)마다 반복
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # 서버 켜질 때 핑 함수 시작
-    keep_alive_task = asyncio.create_task(keep_db_alive())
-    yield
-    # 서버 꺼질 때 핑 함수 종료
-    keep_alive_task.cancel()
+    # Track dependency recovery without blocking HTTP startup.
+    monitor_task = asyncio.create_task(monitor_database())
+    try:
+        yield
+    finally:
+        monitor_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await monitor_task
 # --- Aiven DB 유휴 상태 방지 코드 끝 ---
 
 # 앱 실행 시 lifespan 등록
 app = FastAPI(lifespan=lifespan)
+app.include_router(health_router)
 log_environment_status()
+
+
+@app.exception_handler(db_errors.OperationalError)
+@app.exception_handler(db_errors.InterfaceError)
+async def database_unavailable_handler(request, exc):
+    log_error("database_unavailable", exc)
+    return JSONResponse(status_code=503, headers={"Retry-After": "30"}, content={
+        "detail": "회원 정보 서버에 연결하지 못했습니다. 작성한 내용은 유지됩니다. 잠시 후 다시 시도해 주세요.",
+        "request_id": request_id_var.get(),
+    })
+
+
+@app.exception_handler(db_errors.IntegrityError)
+async def database_conflict_handler(request, exc):
+    log_error("database_conflict", exc)
+    return JSONResponse(status_code=409, content={"detail": "이미 등록된 항목이거나 변경된 자료입니다. 새로고침한 뒤 다시 확인해 주세요."})
 
 app.add_middleware(
     CORSMiddleware,
@@ -100,10 +104,12 @@ def summary(lat: float, lon: float):
         raise HTTPException(status_code=502, detail=f"날씨 조회 중 오류가 발생했습니다. request_id={request_id_var.get()}") from None
     
     return {
-        "current": current,
-        "hourly": forecast,
-        "air_quality": air_quality,
-        "weekly": weekly
+        "current": current, "hourly": forecast, "air_quality": air_quality, "weekly": weekly,
+        "metadata": {
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "degraded": not forecast or not weekly or air_quality.get("pm25") is None,
+            "missing_fields": [field for field in ("humidity", "wind_speed", "sunrise", "sunset") if current.get(field) is None],
+        },
     }
 
 @app.get("/api/location/search")
@@ -132,9 +138,13 @@ def api_search_mountain(q: str):
 
 @app.get("/api/mountain/summary")
 def api_mountain_summary(name: str):
-    result = get_mountain_weather(name)
+    try:
+        result = get_mountain_weather(name)
+    except RuntimeError:
+        raise HTTPException(status_code=503, detail="기상 공급 기관에서 산악 예보를 받지 못했습니다. 잠시 후 다시 확인해 주세요.") from None
     if not result:
         raise HTTPException(status_code=404, detail="산 정보를 불러올 수 없습니다.")
+    result["metadata"] = {"generated_at": datetime.now(timezone.utc).isoformat(), "degraded": not result.get("hourly")}
     return result
 
 @app.get("/api/fishing/summary")
@@ -350,7 +360,7 @@ def signup(req: SignUpRequest):
     if len(req.username) < 4 or len(req.password) < 4 or not req.name.strip():
         raise HTTPException(status_code=400, detail="입력값을 확인해주세요")
 
-    hashed = bcrypt.hashpw(req.password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+    hashed = _hash_pw(req.password)
 
     conn = get_conn()
     try:
@@ -377,7 +387,7 @@ def login(req: LoginRequest):
     finally:
         conn.close()
 
-    if not user or not bcrypt.checkpw(req.password.encode("utf-8"), user["password_hash"].encode("utf-8")):
+    if not user or len(req.password.encode("utf-8")) > 72 or not bcrypt.checkpw(req.password.encode("utf-8"), user["password_hash"].encode("utf-8")):
         raise HTTPException(status_code=401, detail="아이디 또는 비밀번호가 올바르지 않습니다")
     return {
         "message": "로그인 성공",
@@ -509,6 +519,8 @@ def _serialize_hiking_plan(row):
 def _validate_hiking_plan(req: HikingPlanRequest):
     if req.pace not in {"slow", "normal", "fast"}:
         raise HTTPException(status_code=400, detail="산행 속도를 확인해주세요")
+    if any(not value.strip() for value in (req.name, req.mountain_name, req.course_name)):
+        raise HTTPException(status_code=400, detail="계획 이름과 산·코스를 입력해 주세요")
     if len(req.items) > 100:
         raise HTTPException(status_code=400, detail="준비물은 계획당 100개까지 저장할 수 있습니다")
     normalized = [item.name.strip() for item in req.items]
@@ -696,6 +708,8 @@ def list_hiking_parties(authorization: str | None = Header(default=None)):
 def create_hiking_party(req: HikingPartyCreateRequest, authorization: str | None = Header(default=None)):
     if req.pace not in {"slow", "normal", "fast"}:
         raise HTTPException(status_code=400, detail="산행 속도를 확인해주세요")
+    if any(not value.strip() for value in (req.name, req.mountain_name, req.course_name)):
+        raise HTTPException(status_code=400, detail="계획 이름과 산·코스를 입력해 주세요")
     if len(req.items) > 100:
         raise HTTPException(status_code=400, detail="공동 준비물은 파티당 100개까지 등록할 수 있습니다")
     normalized_items = [item.name.strip() for item in req.items]
@@ -753,7 +767,13 @@ def get_hiking_party(party_id: int, authorization: str | None = Header(default=N
                 JOIN users u ON u.id = m.user_id WHERE m.party_id = %s ORDER BY m.joined_at, u.username
             """, (party_id,))
             members = cur.fetchall()
-            return {**party, "role": role, "members": members, "items": _get_party_items(cur, party_id)}
+            pending_invites = []
+            if role == "owner":
+                cur.execute("""SELECT u.username, u.name FROM hiking_party_invites i
+                    JOIN users u ON u.id = i.invited_user_id
+                    WHERE i.party_id = %s AND i.status = 'pending' ORDER BY i.created_at""", (party_id,))
+                pending_invites = cur.fetchall()
+            return {**party, "role": role, "members": members, "items": _get_party_items(cur, party_id), "pending_invites": pending_invites}
     finally:
         conn.close()
 
@@ -788,12 +808,17 @@ def invite_to_hiking_party(party_id: int, req: HikingPartyInviteRequest, authori
 
 @app.post("/api/hiking/parties/{party_id}/items")
 def add_hiking_party_item(party_id: int, req: HikingPartyItemRequest, authorization: str | None = Header(default=None)):
+    if not req.name.strip():
+        raise HTTPException(status_code=400, detail="준비물 이름을 입력해 주세요")
     conn = get_conn()
     try:
         with conn.cursor() as cur:
             user = _get_token_user(cur, authorization)
             _ensure_hiking_tables(cur)
             _party_member_role(cur, party_id, user["id"])
+            cur.execute("SELECT COUNT(*) AS count FROM hiking_party_items WHERE party_id = %s", (party_id,))
+            if cur.fetchone()["count"] >= 100:
+                raise HTTPException(status_code=400, detail="공동 준비물은 파티당 100개까지 등록할 수 있습니다")
             cur.execute("INSERT INTO hiking_party_items (party_id, name, quantity, created_by_user_id) VALUES (%s, %s, %s, %s)",
                         (party_id, req.name.strip(), req.quantity, user["id"]))
             item_id = cur.lastrowid
@@ -837,6 +862,8 @@ def update_hiking_party_item(party_id: int, item_id: int, req: HikingPartyItemUp
                     assignee_id = assignee["id"]
                 updates.append("assigned_to_user_id = %s")
                 values.append(assignee_id)
+            if not updates:
+                raise HTTPException(status_code=400, detail="변경할 내용을 입력해 주세요")
             if updates:
                 cur.execute(f"UPDATE hiking_party_items SET {', '.join(updates)} WHERE id = %s AND party_id = %s", (*values, item_id, party_id))
         conn.commit()
@@ -900,7 +927,7 @@ def _hash_pw(password: str) -> str:
 def _verify_user(cur, username: str, password: str):
     cur.execute("SELECT * FROM users WHERE username = %s", (username,))
     user = cur.fetchone()
-    if not user or not bcrypt.checkpw(password.encode("utf-8"), user["password_hash"].encode("utf-8")):
+    if not user or len(password.encode("utf-8")) > 72 or not bcrypt.checkpw(password.encode("utf-8"), user["password_hash"].encode("utf-8")):
         raise HTTPException(status_code=401, detail="비밀번호가 올바르지 않습니다")
     return user
 
@@ -950,7 +977,7 @@ def delete_user(req: DeleteUserRequest):
 
 class ResetPasswordRequest(BaseModel):
     username: str
-    name: str
+    current_password: str = Field(min_length=4, max_length=72)
     new_password: str
 
 @app.post("/api/password/reset")
@@ -960,11 +987,7 @@ def reset_password(req: ResetPasswordRequest):
     conn = get_conn()
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT id FROM users WHERE username = %s AND name = %s",
-                        (req.username, req.name.strip()))
-            user = cur.fetchone()
-            if not user:
-                raise HTTPException(status_code=404, detail="일치하는 회원 정보가 없습니다")
+            user = _verify_user(cur, req.username, req.current_password)
             cur.execute("UPDATE users SET password_hash = %s WHERE id = %s",
                         (_hash_pw(req.new_password), user["id"]))
         conn.commit()

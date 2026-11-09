@@ -103,120 +103,92 @@ def get_current_weather(lat: float, lon: float):
     base_date, base_time = get_kma_base_time()
     kst = timezone(timedelta(hours=9))
     now = datetime.now(kst)
-    today_str = now.strftime("%Y%m%d")
-    
-    url = "http://apis.data.go.kr/1360000/VilageFcstInfoService_2.0/getVilageFcst"
-    params = {
-        "serviceKey": KMA_API_KEY,
-        "pageNo": "1", "numOfRows": "300", "dataType": "JSON",
-        "base_date": base_date, "base_time": base_time, "nx": nx, "ny": ny
-    }
-    
+    today = now.strftime("%Y%m%d")
+    current_hour = now.strftime("%Y%m%d %H00")
+    params = {"serviceKey": KMA_API_KEY, "pageNo": "1", "numOfRows": "350", "dataType": "JSON",
+              "base_date": base_date, "base_time": base_time, "nx": nx, "ny": ny}
     try:
-        res = logged_get(url, params=params, timeout=5)
-        items = logged_json(res).get("response", {}).get("body", {}).get("items", {}).get("item", [])
-    except Exception as diagnostic_exc:
-        log_error("weather_fallback", diagnostic_exc, function="get_current_weather")
+        response = logged_get("http://apis.data.go.kr/1360000/VilageFcstInfoService_2.0/getVilageFcst", params=params, timeout=5)
+        items = logged_json(response).get("response", {}).get("body", {}).get("items", {}).get("item", [])
+    except Exception as exc:
+        log_error("weather_fallback", exc, function="get_current_weather")
         items = []
 
-    if not items:
-        emit("weather_default_values_used", function="get_current_weather", reason="no_kma_items")
+    slots = {}
+    today_temps, maxima, minima = [], [], []
+    for item in items:
+        date, hour, category = item.get("fcstDate", ""), item.get("fcstTime", ""), item.get("category")
+        value = item.get("fcstValue")
+        if f"{date} {hour}" >= current_hour:
+            slots.setdefault(f"{date} {hour}", {})[category] = value
+        if date == today:
+            try:
+                if category == "TMP": today_temps.append(float(value))
+                elif category == "TMX": maxima.append(float(value))
+                elif category == "TMN": minima.append(float(value))
+            except (TypeError, ValueError):
+                pass
+    target = slots[min(slots)] if slots else {}
+    def numeric(value):
+        try:
+            return float(value) if value is not None else None
+        except (TypeError, ValueError):
+            return None
 
-    temp = 20.0; humidity = 50; wind_speed = 0.0; sky = "1"; pty = "0"
-    tmx = None; tmn = None
-    today_temps = []
-    
-    if items:
-        target_date = items[0].get("fcstDate")
-        target_time = items[0].get("fcstTime")
-        for item in items:
-            f_date = item.get("fcstDate")
-            f_time = item.get("fcstTime")
-            cat = item.get("category")
-            val = item.get("fcstValue", "0")
-            
-            if f_date == target_date and f_time == target_time:
-                if cat == "TMP": temp = float(val)
-                elif cat == "REH": humidity = float(val)
-                elif cat == "WSD": wind_speed = float(val)
-                elif cat == "SKY": sky = str(val)
-                elif cat == "PTY": pty = str(val)
-                
-            if f_date == today_str:
-                if cat == "TMX": tmx = float(val)
-                elif cat == "TMN": tmn = float(val)
-                elif cat == "TMP": today_temps.append(float(val))
-
-    if today_temps:
-        temp_max = round(tmx if tmx is not None else max(today_temps))
-        temp_min = round(tmn if tmn is not None else min(today_temps))
-    else:
-        temp_max = round(tmx if tmx is not None else temp + 2)
-        temp_min = round(tmn if tmn is not None else temp - 2)
-
-    if temp > temp_max: temp_max = round(temp)
-    if temp < temp_min: temp_min = round(temp)
-
-    sunrise_str = "06:00"; sunset_str = "18:30"
-    feels_like = temp
-    is_day = True 
-
+    owm = {}
     try:
-        owm_res = logged_get(
-            f"{BASE}/weather",
-            params={"lat": lat, "lon": lon, "appid": OWM_API_KEY, "units": "metric"},
-            timeout=5
-        )
-        if owm_res.status_code == 200:
-            owm_data = logged_json(owm_res)
-            sys_data = owm_data.get("sys", {})
-            now_ts = now.timestamp()
-            
-            if "sunrise" in sys_data and "sunset" in sys_data:
-                sunrise_str = datetime.fromtimestamp(sys_data["sunrise"], kst).strftime("%H:%M")
-                sunset_str = datetime.fromtimestamp(sys_data["sunset"], kst).strftime("%H:%M")
-                if now_ts < sys_data["sunrise"] or now_ts > sys_data["sunset"]:
-                    is_day = False
-                    
-            if "main" in owm_data and "feels_like" in owm_data["main"]:
-                feels_like = round(owm_data["main"]["feels_like"], 1)
-    except Exception as diagnostic_exc:
-        log_error("weather_fallback", diagnostic_exc, function="get_current_weather")
-        is_day = 6 <= now.hour < 18
-
-    yesterday_temp = get_yesterday_temp(lat, lon, nx, ny)
-    temp_diff = round(temp - yesterday_temp) if yesterday_temp is not None else 0
-
+        response = logged_get(f"{BASE}/weather", params={"lat": lat, "lon": lon, "appid": OWM_API_KEY, "units": "metric", "lang": "kr"}, timeout=5)
+        if response.status_code == 200: owm = logged_json(response)
+    except Exception as exc:
+        log_error("weather_fallback", exc, function="get_current_weather")
+    main = owm.get("main", {})
+    kma_temp = numeric(target.get("TMP"))
+    temp = kma_temp if kma_temp is not None else numeric(main.get("temp"))
+    if temp is None:
+        raise RuntimeError("기온 자료를 받지 못했습니다. 기상 공급 기관 연결을 다시 확인해 주세요.")
+    humidity = numeric(target.get("REH"))
+    if humidity is None: humidity = numeric(main.get("humidity"))
+    wind = numeric(target.get("WSD"))
+    if wind is None: wind = numeric(owm.get("wind", {}).get("speed"))
+    feels_like = numeric(main.get("feels_like"))
+    temp_max = max(maxima or today_temps) if maxima or today_temps else numeric(main.get("temp_max"))
+    temp_min = min(minima or today_temps) if minima or today_temps else numeric(main.get("temp_min"))
+    if temp_max is not None: temp_max = round(max(temp, temp_max))
+    if temp_min is not None: temp_min = round(min(temp, temp_min))
+    sys_data = owm.get("sys", {})
+    sunrise, sunset = None, None
+    is_day = 6 <= now.hour < 18
+    if sys_data.get("sunrise") and sys_data.get("sunset"):
+        sunrise = datetime.fromtimestamp(sys_data["sunrise"], kst).strftime("%H:%M")
+        sunset = datetime.fromtimestamp(sys_data["sunset"], kst).strftime("%H:%M")
+        is_day = sys_data["sunrise"] <= now.timestamp() <= sys_data["sunset"]
     suffix = "d" if is_day else "n"
-    
-    # 💡 [핵심 수정] 기온이 0도 이하인데 비나 눈이 온다면 무조건 눈(13)으로 표출
-    desc = "맑음"; icon = f"01{suffix}"
-    if pty in ["1", "4"] or (pty == "2" and temp > 0): 
-        if temp <= 0:
-            desc = "눈"; icon = f"13{suffix}"
-        else:
-            desc = "비"; icon = f"09{suffix}"
-    elif pty in ["2", "3"] and temp <= 0: 
-        desc = "눈"; icon = f"13{suffix}"
-    elif sky == "3": 
-        desc = "구름많음"; icon = f"03{suffix}"
-    elif sky == "4": 
-        desc = "흐림"; icon = f"04{suffix}"
-
+    weather = (owm.get("weather") or [{}])[0]
+    description, icon = weather.get("description", "하늘 상태 자료 없음"), weather.get("icon")
+    pty, sky = str(target.get("PTY", "")), str(target.get("SKY", ""))
+    if pty in {"1", "4"} or (pty == "2" and temp > 0):
+        description, icon = ("눈", f"13{suffix}") if temp <= 0 else ("비", f"09{suffix}")
+    elif pty in {"2", "3"} and temp <= 0: description, icon = "눈", f"13{suffix}"
+    elif sky == "3": description, icon = "구름많음", f"03{suffix}"
+    elif sky == "4": description, icon = "흐림", f"04{suffix}"
+    elif sky == "1": description, icon = "맑음", f"01{suffix}"
+    yesterday = get_yesterday_temp(lat, lon, nx, ny)
     return {
-        "city": "기상청 동네예보",
-        "temp": round(temp),
-        "feels_like": round(feels_like),
-        "temp_max": temp_max,
-        "temp_min": temp_min,
-        "temp_diff": temp_diff,
-        "humidity": int(humidity),
-        "wind_speed": wind_speed,
-        "description": desc,
-        "icon": icon,
-        "sunrise": sunrise_str,
-        "sunset": sunset_str,
+        "city": "기상청 동네예보" if kma_temp is not None else "OpenWeather 현재 날씨",
+        "temp": round(temp), "feels_like": round(feels_like) if feels_like is not None else None,
+        "temp_max": temp_max, "temp_min": temp_min,
+        "temp_diff": round(temp - yesterday) if yesterday is not None else None,
+        "humidity": round(humidity) if humidity is not None else None,
+        "wind_speed": wind, "description": description, "icon": icon,
+        "sunrise": sunrise, "sunset": sunset,
+        "weather_sources": {
+            "temperature": "기상청 동네예보" if kma_temp is not None else "OpenWeather 현재 날씨 (대체 자료)",
+            "wind": "기상청 동네예보" if numeric(target.get("WSD")) is not None else "OpenWeather 또는 자료 없음",
+            "humidity": "기상청 동네예보" if numeric(target.get("REH")) is not None else "OpenWeather 또는 자료 없음",
+        },
+        "data_as_of": now.isoformat(timespec="minutes"),
     }
+
 
 def get_hourly_forecast(lat: float, lon: float, count: int = 24):
     nx, ny = get_nx_ny(lat, lon)
@@ -246,7 +218,7 @@ def get_hourly_forecast(lat: float, lon: float, count: int = 24):
             
         if ftime not in forecast_dict:
             forecast_dict[ftime] = {
-                "temp": 0.0, "sky": "1", "pty": "0", "pop": 0.0,
+                "temp": None, "sky": None, "pty": None, "pop": 0.0,
                 "wind_speed": None, "humidity": None,
             }
         
@@ -265,6 +237,8 @@ def get_hourly_forecast(lat: float, lon: float, count: int = 24):
     for ftime in sorted_times:
         f_data = forecast_dict[ftime]
         pty = f_data["pty"]; sky = f_data["sky"]; t = f_data["temp"]
+        if t is None:
+            continue
         hour_num = int(ftime[9:11])
         
         is_day = 6 <= hour_num < 18
@@ -286,6 +260,7 @@ def get_hourly_forecast(lat: float, lon: float, count: int = 24):
         
         result.append({
             "time": f"{hour_num}시", "temp": round(t),
+            "valid_at": datetime.strptime(ftime, "%Y%m%d %H%M").replace(tzinfo=kst).isoformat(),
             "pop": f_data["pop"], "description": desc, "icon": icon,
             "wind_speed": round(f_data["wind_speed"], 1) if f_data["wind_speed"] is not None else None,
             "humidity": round(f_data["humidity"]) if f_data["humidity"] is not None else None,
@@ -625,8 +600,10 @@ def get_mountain_weather(mountain_name: str):
 
     base_temp = round(base_weather["temp"])
     summit_temp = round(apply_mountain_lapse_rate(base_weather["temp"], elevation))
-    summit_wind = round(max(1.2, base_weather["wind_speed"] * 1.6 + (elevation / 1000.0)), 1)
-    summit_humidity = min(100, int(base_weather.get("humidity", 50) + 8))
+    base_wind = base_weather.get("wind_speed")
+    summit_wind = round(max(1.2, base_wind * 1.6 + (elevation / 1000.0)), 1) if base_wind is not None else None
+    base_humidity = base_weather.get("humidity")
+    summit_humidity = min(100, int(base_humidity + 8)) if base_humidity is not None else None
 
     # 산림청 관측값은 항목별로 존재하는 경우에만 해당 추정값을 대체합니다.
     source_as_of = datetime.now(timezone(timedelta(hours=9))).isoformat(timespec="minutes")
@@ -646,10 +623,10 @@ def get_mountain_weather(mountain_name: str):
             summit_humidity = forest_obs["humidity"]
             weather_sources["humidity"] = "산림청 산악기상 관측 응답값"
 
-    wind_chill_drop = round(summit_wind * 0.7) if summit_temp <= 15 else 0
+    wind_chill_drop = round(summit_wind * 0.7) if summit_temp <= 15 and summit_wind is not None else 0
     summit_feels_like = summit_temp - wind_chill_drop
     summit_drop = max(1, base_temp - summit_temp)
-    safe_descent_time = calculate_safe_descent_time(base_weather.get("sunset", "17:30"))
+    safe_descent_time = calculate_safe_descent_time(base_weather["sunset"]) if base_weather.get("sunset") else None
 
     mountain_hourly = []
     for h in base_hourly:
@@ -667,6 +644,7 @@ def get_mountain_weather(mountain_name: str):
                 
         mountain_hourly.append({
             "time": h["time"], "temp": round(m_h_temp), "pop": h["pop"],
+            "valid_at": h.get("valid_at"),
             "description": "눈" if m_icon.startswith("13") else h["description"],
             "icon": m_icon,
             "wind_speed": m_h_wind,
@@ -733,8 +711,8 @@ def get_mountain_weather(mountain_name: str):
             "weather_sources": weather_sources,
             "data_as_of": source_as_of,
             "data_note": "정상 관측값이 없는 항목은 평지 예보와 고도 보정으로 추정합니다.",
-            "temp_max": round(apply_mountain_lapse_rate(base_weather["temp_max"], elevation)),
-            "temp_min": round(apply_mountain_lapse_rate(base_weather["temp_min"], elevation))
+            "temp_max": round(apply_mountain_lapse_rate(base_weather["temp_max"], elevation)) if base_weather.get("temp_max") is not None else None,
+            "temp_min": round(apply_mountain_lapse_rate(base_weather["temp_min"], elevation)) if base_weather.get("temp_min") is not None else None
         },
         "hourly": mountain_hourly,
         "air_quality": air_quality,

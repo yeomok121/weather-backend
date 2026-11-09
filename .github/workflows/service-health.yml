@@ -1,0 +1,32 @@
+name: Service health
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 * * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: service-health
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      WEATHER_API_BASE: https://weather-backend-api-goor.onrender.com
+    steps:
+      - name: Check HTTP process and member database
+        run: |
+          curl --fail --silent --show-error --retry 2 --retry-delay 10 --connect-timeout 15 --max-time 100 "$WEATHER_API_BASE/api/health/live"
+          curl --fail --silent --show-error --retry 2 --retry-delay 10 --connect-timeout 15 --max-time 100 "$WEATHER_API_BASE/api/health"
+      - name: Check usable forecast data
+        run: |
+          curl --fail --silent --show-error --retry 1 --retry-delay 5 --connect-timeout 15 --max-time 100 "$WEATHER_API_BASE/api/weather/summary?lat=37.5034&lon=126.7660" > forecast.json
+          python -c "import json; d=json.load(open('forecast.json')); t=d.get('current',{}).get('temp'); assert isinstance(t,(int,float)) and not isinstance(t,bool), 'Usable temperature is missing'; print('Forecast is usable')"
+      - name: Record monitoring result
+        if: always()
+        run: echo 'Checked application liveness, member database and actual forecast. Review failed steps and the Render request log for diagnosis.' >> "$GITHUB_STEP_SUMMARY"
