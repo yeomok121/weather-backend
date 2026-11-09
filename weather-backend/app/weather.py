@@ -197,7 +197,7 @@ def get_hourly_forecast(lat: float, lon: float, count: int = 24):
     url = "http://apis.data.go.kr/1360000/VilageFcstInfoService_2.0/getVilageFcst"
     params = {
         "serviceKey": KMA_API_KEY,
-        "pageNo": "1", "numOfRows": "350", "dataType": "JSON",
+        "pageNo": "1", "numOfRows": "1000", "dataType": "JSON",
         "base_date": base_date, "base_time": base_time, "nx": nx, "ny": ny
     }
     
@@ -587,7 +587,7 @@ def get_mountain_weather(mountain_name: str):
 
     with concurrent.futures.ThreadPoolExecutor() as executor:
         f_base = executor.submit(get_current_weather, lat, lon)
-        f_hourly = executor.submit(get_hourly_forecast, lat, lon, 24)
+        f_hourly = executor.submit(get_hourly_forecast, lat, lon, 48)
         f_aqi = executor.submit(get_air_quality, lat, lon)
         f_weekly = executor.submit(get_weekly_forecast, lat, lon)
         f_forest = executor.submit(fetch_forest_service_api, mountain_name)
