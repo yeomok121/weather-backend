@@ -4,6 +4,7 @@ import base64
 import json
 import time
 import threading
+import unicodedata
 import concurrent.futures
 import asyncio
 from contextlib import suppress
@@ -169,6 +170,36 @@ class SignUpRequest(BaseModel):
 class LoginRequest(BaseModel):
     username: str
     password: str
+
+def _validate_username(username: str) -> str:
+    username = username.strip()
+    if len(username) < 4 or len(username) > 80:
+        raise HTTPException(status_code=400, detail='아이디는 4~80자로 입력해주세요')
+    return username
+
+def _validate_password_username(username: str, password: str):
+    normalized_id = unicodedata.normalize('NFKC', username).casefold()
+    normalized_password = unicodedata.normalize('NFKC', password).casefold()
+    if normalized_id and normalized_id in normalized_password:
+        raise HTTPException(status_code=400, detail='비밀번호에 아이디를 포함할 수 없습니다')
+
+def _lock_username_changes(cur):
+    # Serialize account creation and username changes even when requests race.
+    # MySQL releases this connection-scoped lock when the connection closes.
+    cur.execute("SELECT GET_LOCK('weather_users_username_v1', 10) AS acquired")
+    if cur.fetchone()['acquired'] != 1:
+        raise HTTPException(status_code=503, detail='아이디 확인이 지연되고 있습니다. 잠시 후 다시 시도해주세요')
+
+@app.get('/api/auth/username-availability')
+def username_availability(username: str):
+    username = _validate_username(username)
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute('SELECT id FROM users WHERE username = %s', (username,))
+            return {'username': username, 'available': cur.fetchone() is None}
+    finally:
+        conn.close()
 
 AUTH_TOKEN_TTL_SECONDS = 60 * 60 * 24 * 7
 _favorites_schema_ready = False
@@ -384,8 +415,10 @@ def _ensure_hiking_tables(cur):
 def signup(req: SignUpRequest):
     # Do not create accounts that cannot sign in because the token key is missing.
     _auth_signing_key()
-    if len(req.username) < 4 or len(req.password) < 4 or not req.name.strip():
+    req.username = _validate_username(req.username)
+    if len(req.password) < 4 or not req.name.strip():
         raise HTTPException(status_code=400, detail="입력값을 확인해주세요")
+    _validate_password_username(req.username, req.password)
 
     hashed = _hash_pw(req.password)
 
@@ -393,6 +426,7 @@ def signup(req: SignUpRequest):
     try:
         with conn.cursor() as cur:
             _ensure_admin_tables(cur)
+            _lock_username_changes(cur)
             cur.execute("SELECT id FROM users WHERE username = %s", (req.username,))
             if cur.fetchone():
                 raise HTTPException(status_code=409, detail="이미 사용 중인 아이디입니다")
@@ -996,6 +1030,8 @@ def update_user(req: UpdateUserRequest):
         raise HTTPException(status_code=400, detail="이름을 입력해주세요")
     if req.new_password and len(req.new_password) < 4:
         raise HTTPException(status_code=400, detail="새 비밀번호는 4자 이상이어야 합니다")
+    if req.new_password:
+        _validate_password_username(req.username, req.new_password)
 
     conn = get_conn()
     try:
@@ -1032,6 +1068,7 @@ class ResetPasswordRequest(BaseModel):
 def reset_password(req: ResetPasswordRequest):
     if len(req.new_password) < 4:
         raise HTTPException(status_code=400, detail="새 비밀번호는 4자 이상이어야 합니다")
+    _validate_password_username(req.username, req.new_password)
     conn = get_conn()
     try:
         with conn.cursor() as cur:
@@ -1127,12 +1164,15 @@ def admin_user_summary(user_id: int, x_admin_password: str | None = Header(defau
 @app.post("/api/admin/users")
 def admin_create_user(req: SignUpRequest, x_admin_password: str | None = Header(default=None), authorization: str | None = Header(default=None)):
     actor = require_admin(x_admin_password, authorization, 'members')
-    if len(req.username) < 4 or len(req.password) < 4 or not req.name.strip():
+    req.username = _validate_username(req.username)
+    if len(req.password) < 4 or not req.name.strip():
         raise HTTPException(status_code=400, detail="입력값을 확인해주세요")
+    _validate_password_username(req.username, req.password)
     conn = get_conn()
     try:
         with conn.cursor() as cur:
             _ensure_admin_tables(cur)
+            _lock_username_changes(cur)
             cur.execute("SELECT id FROM users WHERE username = %s", (req.username,))
             if cur.fetchone():
                 raise HTTPException(status_code=409, detail="이미 사용 중인 아이디입니다")
@@ -1149,15 +1189,21 @@ def admin_create_user(req: SignUpRequest, x_admin_password: str | None = Header(
 @app.put("/api/admin/users/{user_id}")
 def admin_update_user(user_id: int, req: AdminUserUpdate, x_admin_password: str | None = Header(default=None), authorization: str | None = Header(default=None)):
     actor = require_admin(x_admin_password, authorization, 'members')
-    if len(req.username) < 4 or not req.name.strip():
+    req.username = _validate_username(req.username)
+    if not req.name.strip():
         raise HTTPException(status_code=400, detail="입력값을 확인해주세요")
     if req.password and len(req.password) < 4:
         raise HTTPException(status_code=400, detail="비밀번호는 4자 이상이어야 합니다")
+    if req.password:
+        _validate_password_username(req.username, req.password)
     conn = get_conn()
     try:
         with conn.cursor() as cur:
             _ensure_admin_tables(cur)
+            _lock_username_changes(cur)
             target = _require_manage_target(cur, actor, user_id)
+            if req.username != target['username'] and not req.password:
+                raise HTTPException(status_code=400, detail='아이디를 변경할 때 새 비밀번호도 입력해주세요')
             cur.execute("SELECT id FROM users WHERE username = %s AND id <> %s", (req.username, user_id))
             if cur.fetchone():
                 raise HTTPException(status_code=409, detail="이미 사용 중인 아이디입니다")
