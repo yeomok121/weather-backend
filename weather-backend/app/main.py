@@ -737,8 +737,8 @@ def create_hiking_party(req: HikingPartyCreateRequest, authorization: str | None
             cur.execute("INSERT INTO hiking_party_members (party_id, user_id, role) VALUES (%s, %s, 'owner')", (party_id, user["id"]))
             if req.items:
                 cur.executemany(
-                    "INSERT INTO hiking_party_items (party_id, name, quantity, created_by_user_id) VALUES (%s, %s, %s, %s)",
-                    [(party_id, item.name.strip(), 1, user["id"]) for item in req.items],
+                    "INSERT INTO hiking_party_items (party_id, name, quantity, created_by_user_id, is_packed, assigned_to_user_id) VALUES (%s, %s, %s, %s, %s, %s)",
+                    [(party_id, item.name.strip(), 1, user["id"], 1 if item.checked else 0, user["id"] if item.checked else None) for item in req.items],
                 )
         conn.commit()
         return {"id": party_id, "message": "산행 파티를 만들었습니다"}

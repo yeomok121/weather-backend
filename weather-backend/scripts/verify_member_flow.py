@@ -38,7 +38,7 @@ def verify(base_url):
         plan = {"name": "QA 산행 계획", "mountain_name": "북한산", "course_index": 0,
                 "course_name": "백운대 최단 코스 (탐방지원센터)", "weather_date": "2026-11-10", "selected_date_idx": 1,
                 "pace": "normal", "departure_offset_hours": 0, "departure_at": "2026-11-10T00:00:00Z",
-                "items": [{"name": "QA 공동 간식", "checked": False}]}
+                "items": [{"name": "QA 공동 간식", "checked": True}]}
         call('POST', '/api/password/reset', body={"username": member, "name": "Weather QA 2", "new_password": "unauthorized-change"}, expected=422, label='password_change_requires_current_password')
         plan_id = call('POST', '/api/users/me/hiking-plans', owner, plan, label='save_plan')["id"]
         owner_plans = call('GET', '/api/users/me/hiking-plans', owner)
@@ -52,6 +52,8 @@ def verify(base_url):
         call('POST', '/api/hiking/parties', member, party_payload, expected=404, label='cannot_link_other_plan')
         party_id = call('POST', '/api/hiking/parties', owner, party_payload, label='create_party')["id"]
         party = call('GET', f'/api/hiking/parties/{party_id}', owner)
+        assert party['items'][0]['is_packed'] and party['items'][0]['assigned_to_username'] == owner
+        results.append({"check": "checked_items_preserved_when_creating_party", "passed": True})
         item_id = party['items'][0]['id']
         call('GET', f'/api/hiking/parties/{party_id}', expected=401, label='anonymous_party_denied')
         call('GET', f'/api/hiking/parties/{party_id}', member, expected=403, label='outsider_party_denied')
