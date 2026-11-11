@@ -2,14 +2,11 @@ import os
 import time
 import random
 from datetime import datetime, timedelta, timezone
-import google.generativeai as genai
+from google import genai
 from dotenv import load_dotenv
 
 load_dotenv()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-
-if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
 
 AI_CACHE = {}
 CACHE_TTL = 1800  # 30분 캐싱
@@ -223,9 +220,10 @@ def get_ai_contents(current: dict, forecast: list, air_quality: dict, mountain_i
         )
     
     try:
-        target_model = "gemini-1.5-flash"
-        model = genai.GenerativeModel(target_model)
-        response = model.generate_content(prompt)
+        client = genai.Client(api_key=GEMINI_API_KEY)
+        response = client.models.generate_content(
+            model=os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite"), contents=prompt
+        )
         
         if response and response.text:
             text = response.text.strip()
