@@ -56,7 +56,7 @@ class AvailabilityTests(unittest.TestCase):
         response = self.client.post('/api/password/reset', json={'username': 'other_user', 'name': 'Known Public Name', 'new_password': 'new-password'})
         self.assertEqual(response.status_code, 422)
 
-    @patch('app.main.get_conn', side_effect=OperationalError(2003, 'private database address must never be returned'))
+    @patch('app.routers.auth.get_conn', side_effect=OperationalError(2003, 'private database address must never be returned'))
     def test_member_database_failure_returns_actionable_503_without_private_details(self, connection):
         response = self.client.post('/api/login', json={'username': 'qa_probe', 'password': 'invalid'})
         self.assertEqual(response.status_code, 503)
