@@ -7,13 +7,14 @@
 
 import concurrent.futures
 from contextvars import copy_context
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import requests
 
 from app.fishing import providers
 from app.fishing.areas import FISHING_AREAS, REGION_NAMES
 from app.fishing.cache import TTLCache
+from app.fishing.tides import find_extremes, normalize_predictions
 
 # 자료별 보관 시간(초). 기관 갱신 주기보다 짧게 잡았습니다.
 FORECAST_TTL_SECONDS = 10 * 60
@@ -92,6 +93,8 @@ def get_fishing_summary(place: str, region: str, lat: float = 33.96194, lon: flo
         forecast_future = executor.submit(copy_context().run, forecast_task)
         buoy_future = executor.submit(copy_context().run, _load_buoys, lat, lon)
         tide_future = executor.submit(copy_context().run, _load_tide, lat, lon, now.strftime("%Y%m%d"))
+        # 저녁에도 다음 만조·간조를 보여주려고 내일 조위도 함께 받습니다. (실패해도 오늘 자료는 표시)
+        tomorrow_future = executor.submit(copy_context().run, _load_tide, lat, lon, (now + timedelta(days=1)).strftime("%Y%m%d"))
 
         forecast = []
         try:
@@ -113,6 +116,14 @@ def get_fishing_summary(place: str, region: str, lat: float = 33.96194, lon: flo
         except requests.RequestException:
             errors["tide"] = "조위 예측을 가져오지 못했습니다."
 
+        tide_tomorrow = None
+        try:
+            tide_tomorrow = tomorrow_future.result()
+        except (ValueError, requests.RequestException):
+            pass
+
+    predictions = normalize_predictions(tide, tide_tomorrow)
+
     return {
         "area_id": area_id,
         "place": place[:60],
@@ -123,7 +134,13 @@ def get_fishing_summary(place: str, region: str, lat: float = 33.96194, lon: flo
         "sources": {
             "forecast": {"name": "기상청 단기 해상예보", "records": forecast},
             "buoy": {"name": "기상청 해양기상부이·파고부이 관측", "records": buoy},
-            "tide": {"name": "국립해양조사원 TideBED 예측 조위", "data": tide},
+            "tide": {
+                "name": "국립해양조사원 TideBED 예측 조위",
+                "data": tide,  # 오늘 원자료 (예전 화면 호환용)
+                "station": next((point["station"] for point in predictions if point["station"]), ""),
+                "predictions": predictions,  # 오늘·내일 1시간 간격 [{time, height_cm, station}]
+                "extremes": find_extremes(predictions),  # 만조·간조 추정 [{type: high|low, time, height_cm}]
+            },
         },
         "errors": errors,
         "notice": "기관 원자료를 표시합니다. 출조 안전 판단은 최신 특보와 현장 상황도 함께 확인하세요.",

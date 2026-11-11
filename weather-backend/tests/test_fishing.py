@@ -5,7 +5,7 @@ from unittest.mock import Mock, patch
 import requests
 from fastapi.testclient import TestClient
 
-from app.fishing import providers, service
+from app.fishing import providers, service, tides
 from app.fishing.areas import FISHING_AREAS, get_area
 from app.fishing.cache import TTLCache
 from app.main import app
@@ -68,6 +68,8 @@ class FishingSummaryTests(unittest.TestCase):
         self.assertEqual([row['STN_KO'] for row in buoys], ['가까운부이', '먼부이'])  # 거리순, 결측·비부이 제외
         self.assertIsNotNone(buoys[0]['distance_km'])
         self.assertEqual(result['sources']['tide']['data'], TIDE_JSON)
+        self.assertEqual(result['sources']['tide']['predictions'], [{'time': '2099-01-01T13:00+09:00', 'height_cm': 150.0, 'station': '추자도'}])
+        self.assertEqual(result['sources']['tide']['station'], '추자도')
         self.assertEqual(result['errors'], {})
         self.assertEqual(result['region_name'], '제주도 전해상')
         self.assertEqual(result['area_id'], 'chuja')
@@ -78,8 +80,8 @@ class FishingSummaryTests(unittest.TestCase):
             self.summary()
             first = len(calls)
             again = self.summary()
-        self.assertEqual(first, 3)
-        self.assertEqual(len(calls), 3)
+        self.assertEqual(first, 4)  # 해상예보, 부이, 오늘 조위, 내일 조위
+        self.assertEqual(len(calls), 4)
         self.assertEqual(len(again['sources']['buoy']['records']), 2)
 
     def test_cached_buoy_rows_are_not_mutated_between_areas(self):
@@ -124,6 +126,46 @@ class FishingSummaryTests(unittest.TestCase):
     def test_missing_keys_raise(self):
         with self.assertRaises(RuntimeError):
             self.summary()
+
+
+    def test_tomorrow_tide_failure_keeps_today(self):
+        def fetch(url, params, timeout=15):
+            if 'tidebed' in url and params['reqDate'] != service.datetime.now(providers.SEOUL).strftime('%Y%m%d'):
+                raise requests.Timeout('slow')
+            return fake_fetch([])(url, params, timeout)
+        with patch.object(providers, '_fetch', side_effect=fetch):
+            result = self.summary()
+        self.assertEqual(result['errors'], {})
+        self.assertEqual(len(result['sources']['tide']['predictions']), 1)
+
+
+class TideTests(unittest.TestCase):
+    @staticmethod
+    def raw(heights, day='2099-01-01', start=0):
+        return {'body': {'items': {'item': [
+            {'obsvtrNm': '추자도', 'obsrvnDt': f'{day} {start + i:02d}:00', 'obsrvnHgt': str(h)} for i, h in enumerate(heights)]}}}
+
+    def test_merges_days_sorted_and_skips_bad_rows(self):
+        today = self.raw([100, 120])
+        tomorrow = self.raw([90], day='2099-01-02')
+        bad = {'body': {'items': {'item': {'obsrvnDt': 'x', 'obsrvnHgt': '1'}}}}
+        points = tides.normalize_predictions(tomorrow, today, bad, None)
+        self.assertEqual([p['time'] for p in points], ['2099-01-01T00:00+09:00', '2099-01-01T01:00+09:00', '2099-01-02T00:00+09:00'])
+
+    def test_finds_high_and_low_with_sub_hour_estimate(self):
+        points = tides.normalize_predictions(self.raw([100, 200, 260, 250, 180, 90, 40, 60, 120]))
+        extremes = tides.find_extremes(points)
+        self.assertEqual([e['type'] for e in extremes], ['high', 'low'])
+        high, low = extremes
+        # 200, 260, 250 → 꼭짓점은 02시보다 조금 뒤 (02:21), 높이는 260보다 조금 높음
+        self.assertEqual(high['time'], '2099-01-01T02:21+09:00')
+        self.assertGreater(high['height_cm'], 260)
+        self.assertTrue(low['time'].startswith('2099-01-01T05:') or low['time'].startswith('2099-01-01T06:'))
+        self.assertLess(low['height_cm'], 40.1)
+
+    def test_skips_gaps_and_flat_edges(self):
+        points = tides.normalize_predictions(self.raw([100, 200]), self.raw([150], start=5))
+        self.assertEqual(tides.find_extremes(points), [])
 
 
 class TTLCacheTests(unittest.TestCase):
