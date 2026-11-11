@@ -1,4 +1,6 @@
 import os
+import json
+from pathlib import Path
 import requests
 from app.weather_diagnostics import logged_get, logged_json, log_error, emit
 import math
@@ -524,10 +526,28 @@ MOUNTAINS_DB = {
     }
 }
 
+# API 장애에도 이용할 수 있는 지역별 주요 산. 산림청 산정보의 고도와
+# OpenStreetMap 기여자의 정상 좌표를 교차 확인한 참고 목록입니다.
+# Coordinates © OpenStreetMap contributors, ODbL 1.0: https://www.openstreetmap.org/copyright
+try:
+    _local_catalog = json.loads((Path(__file__).parent / 'mountain_catalog.json').read_text(encoding='utf-8'))
+    for _row in _local_catalog.get('mountains', []):
+        _name = _row['name']
+        if _name not in MOUNTAINS_DB:
+            MOUNTAINS_DB[_name] = {
+                'lat': _row['lat'], 'lon': _row['lon'], 'elevation': _row['elevation'],
+                'peak': '', 'terrain': '', 'difficulty': '', 'region': _row['region'],
+                'course_tip': '코스별 정보는 제공 준비 중입니다. 산행 전 공식 탐방 안내와 통제 정보를 확인하세요.',
+                'cctv_url': None, 'catalog_source': '산림청 산정보·OpenStreetMap', 'course_available': False,
+            }
+except (OSError, ValueError, TypeError, KeyError):
+    pass
+
 # 공공데이터 원자료는 좌표와 고도만 사용합니다. 코스·난이도는 추정하지 않습니다.
 _mountain_list_lock = threading.Lock()
 _mountain_list_checked_at = float('-inf')
 _mountain_list_retry_seconds = 600
+_mountain_catalog_diagnostics = {'status': 'not_checked', 'provider_code': None, 'valid_rows': 0}
 
 def refresh_mountain_catalog():
     global _mountain_list_checked_at
@@ -540,17 +560,24 @@ def refresh_mountain_catalog():
             return
         key = os.getenv('MOUNTAIN_LIST_API_KEY', '').strip()
         if not key:
+            _mountain_catalog_diagnostics.update(status='not_configured', provider_code=None, valid_rows=0)
             _mountain_list_checked_at = now
             return
+        _mountain_catalog_diagnostics.update(status='checking', provider_code=None, valid_rows=0)
         try:
             # 페이지 크기 제한이나 중복 산명이 있어도 필요한 자료를 순차 조회합니다.
+            valid_rows = 0
             for page in range(1, 6):
                 response = requests.get(
                     'https://apis.data.go.kr/B553662/top100FamtPlusListBasiInfoService/getTop100FamtPlusListBasiInfoList',
                     params={'serviceKey': unquote(key), 'pageNo': page, 'numOfRows': 100, 'type': 'json'}, timeout=(5, 10))
+                if response.status_code != 200:
+                    _mountain_catalog_diagnostics.update(status='http_error', provider_code=str(response.status_code), valid_rows=valid_rows)
                 response.raise_for_status()
                 payload = response.json().get('response', {})
-                if str(payload.get('header', {}).get('resultCode', '')) not in ('00', '0', '0000'):
+                provider_code = str(payload.get('header', {}).get('resultCode', ''))
+                if provider_code not in ('00', '0', '0000'):
+                    _mountain_catalog_diagnostics.update(status='provider_error', provider_code=provider_code[:12] if provider_code.isdigit() else None, valid_rows=0)
                     raise ValueError('기관 응답 오류')
                 body = payload.get('body') or {}
                 container = body.get('items') or {}
@@ -560,8 +587,6 @@ def refresh_mountain_catalog():
                 if not isinstance(items, list) or not items:
                     break
                 for row in items:
-                    if len(MOUNTAINS_DB) >= 50:
-                        break
                     if not isinstance(row, dict):
                         continue
                     name = str(row.get('frtrlNm') or '').strip()
@@ -569,7 +594,10 @@ def refresh_mountain_catalog():
                         lat, lon, elevation = float(row['lat']), float(row['lot']), float(row['aslAltide'])
                     except (KeyError, TypeError, ValueError):
                         continue
-                    if not name or name in MOUNTAINS_DB or not (33 <= lat <= 39 and 124 <= lon <= 132 and 0 < elevation < 2500):
+                    if not name or not (33 <= lat <= 39 and 124 <= lon <= 132 and 0 < elevation < 2500):
+                        continue
+                    valid_rows += 1
+                    if name in MOUNTAINS_DB or len(MOUNTAINS_DB) >= 50:
                         continue
                     MOUNTAINS_DB[name] = {
                         'lat': lat, 'lon': lon, 'elevation': round(elevation), 'peak': '',
@@ -586,12 +614,15 @@ def refresh_mountain_catalog():
                         break
                 except (TypeError, ValueError):
                     pass
+            _mountain_catalog_diagnostics.update(status='ok' if valid_rows else 'empty', provider_code=provider_code, valid_rows=valid_rows)
             _mountain_list_checked_at = now
-            if len(MOUNTAINS_DB) < 50:
+            if not valid_rows or len(MOUNTAINS_DB) < 50:
                 # 부족한 자료는 짧은 간격으로 재시도하되 기존 목록을 유지합니다.
                 _mountain_list_checked_at = now - 540
 
         except (requests.RequestException, ValueError, TypeError, KeyError, AttributeError):
+            if _mountain_catalog_diagnostics['status'] not in ('http_error', 'provider_error'):
+                _mountain_catalog_diagnostics.update(status='connection_or_format_error', provider_code=None, valid_rows=0)
             # 키나 응답 본문을 기록하지 않습니다. 기존 산 목록은 계속 제공합니다.
             _mountain_list_checked_at = now - 540
 
@@ -732,8 +763,8 @@ def get_mountain_weather(mountain_name: str):
     for w in base_weekly:
         w_temp_max = round(apply_mountain_lapse_rate(w["temp_max"], elevation))
         w_temp_min = round(apply_mountain_lapse_rate(w["temp_min"], elevation))
-        w_wind = round(max(1.2, w["wind_speed"] * 1.6 + (elevation / 1000.0)), 1)
-        w_hum = min(100, int(w["humidity"] + 8))
+        w_wind = round(max(1.2, w["wind_speed"] * 1.6 + (elevation / 1000.0)), 1) if w.get("wind_speed") is not None else None
+        w_hum = min(100, int(w["humidity"] + 8)) if w.get("humidity") is not None else None
         
         # 💡 [핵심 수정] 산악 주간 예보에서도 영하+강수확률 30% 이상이면 비를 눈으로 변환
         m_w_icon = w["icon"]

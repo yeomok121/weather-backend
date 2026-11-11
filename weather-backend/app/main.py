@@ -30,7 +30,7 @@ from app.weather import (
     get_weekly_forecast,
     search_mountain,
     get_mountain_weather,
-    MOUNTAINS_DB, refresh_mountain_catalog
+    MOUNTAINS_DB, refresh_mountain_catalog, _mountain_catalog_diagnostics
 )
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -130,6 +130,11 @@ def api_mountain_list():
         {"name": name, **info}
         for name, info in list(MOUNTAINS_DB.items())
     ]
+
+@app.get("/api/mountain/catalog/status")
+def api_mountain_catalog_status():
+    refresh_mountain_catalog()
+    return {"catalog_count": len(MOUNTAINS_DB), "source_check": dict(_mountain_catalog_diagnostics)}
 
 @app.get("/api/mountain/search")
 def api_search_mountain(q: str):
