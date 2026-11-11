@@ -2,6 +2,9 @@ import os
 import requests
 from app.weather_diagnostics import logged_get, logged_json, log_error, emit
 import math
+import threading
+import time
+from urllib.parse import unquote
 import concurrent.futures
 from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
@@ -521,9 +524,61 @@ MOUNTAINS_DB = {
     }
 }
 
+# 공공데이터 원자료는 좌표와 고도만 사용합니다. 코스·난이도는 추정하지 않습니다.
+_mountain_list_lock = threading.Lock()
+_mountain_list_checked_at = float('-inf')
+_mountain_list_retry_seconds = 600
+
+def refresh_mountain_catalog():
+    global _mountain_list_checked_at
+    now = time.monotonic()
+    if now - _mountain_list_checked_at < _mountain_list_retry_seconds:
+        return
+    with _mountain_list_lock:
+        now = time.monotonic()
+        if now - _mountain_list_checked_at < _mountain_list_retry_seconds:
+            return
+        key = os.getenv('MOUNTAIN_LIST_API_KEY', '').strip()
+        _mountain_list_checked_at = now
+        if not key:
+            return
+        try:
+            response = requests.get(
+                'https://apis.data.go.kr/B553662/top100FamtPlusListBasiInfoService/getTop100FamtPlusListBasiInfoList',
+                params={'serviceKey': unquote(key), 'pageNo': 1, 'numOfRows': 200, 'type': 'json'}, timeout=(5, 10))
+            response.raise_for_status()
+            payload = response.json().get('response', {})
+            if str(payload.get('header', {}).get('resultCode', '')) not in ('00', '0', '0000'):
+                raise ValueError('기관 응답 오류')
+            items = payload.get('body', {}).get('items', {}).get('item', [])
+            if isinstance(items, dict):
+                items = [items]
+            for row in items:
+                if len(MOUNTAINS_DB) >= 50:
+                    break
+                name = str(row.get('frtrlNm') or '').strip()
+                try:
+                    lat, lon, elevation = float(row['lat']), float(row['lot']), float(row['aslAltide'])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if not name or name in MOUNTAINS_DB or not (33 <= lat <= 39 and 124 <= lon <= 132 and 0 < elevation < 2500):
+                    continue
+                MOUNTAINS_DB[name] = {
+                    'lat': lat, 'lon': lon, 'elevation': round(elevation), 'peak': '',
+                    'terrain': '', 'difficulty': '', 'region': str(row.get('ctpvNm') or ''),
+                    'course_tip': '코스별 정보는 제공 준비 중입니다. 산행 전 공식 탐방 안내와 통제 정보를 확인하세요.',
+                    'cctv_url': None, 'catalog_source': '한국등산·트레킹지원센터 100대명산플러스',
+                    'course_available': False,
+                }
+        except (requests.RequestException, ValueError, TypeError, KeyError, AttributeError):
+            # 키나 응답 본문을 기록하지 않습니다. 기존 산 목록은 계속 제공합니다.
+            _mountain_list_checked_at = now - 540
+
 def search_mountain(q: str):
+    refresh_mountain_catalog()
     q_clean = q.strip()
-    for name, data in MOUNTAINS_DB.items():
+    if not q_clean: return None
+    for name, data in sorted(list(MOUNTAINS_DB.items()), key=lambda pair: pair[0] != q_clean):
         if q_clean in name or name in q_clean or q_clean in data.get("peak", ""):
             return {
                 "name": name,
@@ -535,7 +590,8 @@ def search_mountain(q: str):
                 "difficulty": data["difficulty"],
                 "region": data["region"],
                 "course_tip": data["course_tip"],
-                "cctv_url": data.get("cctv_url", "https://www.knps.or.kr/portal/main/contents.do?menuNo=8000159")
+                "cctv_url": data.get("cctv_url"),
+                "course_available": data.get("course_available", True)
             }
     return None
 
@@ -575,6 +631,7 @@ def fetch_forest_service_api(mountain_name: str) -> dict | None:
     return None
 
 def get_mountain_weather(mountain_name: str):
+    refresh_mountain_catalog()
     m_info = MOUNTAINS_DB.get(mountain_name)
     if not m_info:
         found = search_mountain(mountain_name)
@@ -589,13 +646,13 @@ def get_mountain_weather(mountain_name: str):
         f_hourly = executor.submit(get_hourly_forecast, lat, lon, 48)
         f_aqi = executor.submit(get_air_quality, lat, lon)
         f_weekly = executor.submit(get_weekly_forecast, lat, lon)
-        f_forest = executor.submit(fetch_forest_service_api, mountain_name)
+        f_forest = executor.submit(fetch_forest_service_api, mountain_name) if m_info.get("course_available", True) else None
 
         base_weather = f_base.result()
         base_hourly = f_hourly.result()
         air_quality = f_aqi.result()
         base_weekly = f_weekly.result()
-        forest_obs = f_forest.result()
+        forest_obs = f_forest.result() if f_forest else None
 
     base_temp = round(base_weather["temp"])
     summit_temp = round(apply_mountain_lapse_rate(base_weather["temp"], elevation))
@@ -684,6 +741,8 @@ def get_mountain_weather(mountain_name: str):
             "difficulty": m_info["difficulty"],
             "region": m_info["region"],
             "course_tip": m_info["course_tip"],
+            "course_available": m_info.get("course_available", True),
+            "catalog_source": m_info.get("catalog_source"),
             "cctv_url": m_info.get("cctv_url", "https://www.knps.or.kr/portal/main/contents.do?menuNo=8000159"),
             "base_temp": base_temp,
             "summit_drop": summit_drop,
@@ -694,7 +753,7 @@ def get_mountain_weather(mountain_name: str):
             "data_note": "정상 관측값이 없는 항목은 평지 예보와 고도 보정으로 추정합니다."
         },
         "current": {
-            "city": f"{mountain_name} ({m_info['peak']})",
+            "city": f"{mountain_name} ({m_info['peak']})" if m_info["peak"] else mountain_name,
             "temp": summit_temp,
             "feels_like": summit_feels_like,
             "base_temp": base_temp,

@@ -30,7 +30,7 @@ from app.weather import (
     get_weekly_forecast,
     search_mountain,
     get_mountain_weather,
-    MOUNTAINS_DB
+    MOUNTAINS_DB, refresh_mountain_catalog
 )
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -125,9 +125,10 @@ def location(q: str):
 # ---------------------------------------------------------
 @app.get("/api/mountain/list")
 def api_mountain_list():
+    refresh_mountain_catalog()
     return [
         {"name": name, **info}
-        for name, info in MOUNTAINS_DB.items()
+        for name, info in list(MOUNTAINS_DB.items())
     ]
 
 @app.get("/api/mountain/search")
