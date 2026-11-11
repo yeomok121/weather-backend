@@ -407,6 +407,13 @@ def _ensure_hiking_tables(cur):
                     REFERENCES users(id) ON DELETE CASCADE
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4""",
         ]
+        statements.append("""CREATE TABLE IF NOT EXISTS hiking_party_schedule_log (
+            id INT NOT NULL AUTO_INCREMENT PRIMARY KEY, party_id INT NOT NULL,
+            actor_name VARCHAR(120) NOT NULL, old_schedule TEXT NOT NULL, new_schedule TEXT NOT NULL,
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            KEY idx_party_schedule_log (party_id, id),
+            CONSTRAINT fk_party_schedule_log_party FOREIGN KEY (party_id) REFERENCES hiking_parties(id) ON DELETE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4""")
         for statement in statements:
             cur.execute(statement)
         _hiking_schema_ready = True
@@ -831,7 +838,7 @@ def get_hiking_party(party_id: int, authorization: str | None = Header(default=N
             _ensure_hiking_tables(cur)
             role = _party_member_role(cur, party_id, user["id"])
             cur.execute("""
-                SELECT p.id, p.name, p.mountain_name, p.course_name, p.weather_date, p.pace,
+                SELECT p.id, p.name, p.plan_id, p.mountain_name, p.course_name, p.weather_date, p.pace,
                        p.departure_offset_hours, p.departure_at, p.owner_user_id,
                        owner.username AS owner_username, owner.name AS owner_name
                 FROM hiking_parties p JOIN users owner ON owner.id = p.owner_user_id WHERE p.id = %s
@@ -846,11 +853,13 @@ def get_hiking_party(party_id: int, authorization: str | None = Header(default=N
             members = cur.fetchall()
             pending_invites = []
             if role == "owner":
-                cur.execute("""SELECT u.username, u.name FROM hiking_party_invites i
+                cur.execute("""SELECT i.id, u.username, u.name FROM hiking_party_invites i
                     JOIN users u ON u.id = i.invited_user_id
                     WHERE i.party_id = %s AND i.status = 'pending' ORDER BY i.created_at""", (party_id,))
                 pending_invites = cur.fetchall()
-            return {**party, "role": role, "members": members, "items": _get_party_items(cur, party_id), "pending_invites": pending_invites}
+            cur.execute("SELECT actor_name, old_schedule, new_schedule, created_at FROM hiking_party_schedule_log WHERE party_id = %s ORDER BY id DESC LIMIT 5", (party_id,))
+            history = cur.fetchall()
+            return {**party, "role": role, "members": members, "items": _get_party_items(cur, party_id), "pending_invites": pending_invites, "schedule_history": history}
     finally:
         conn.close()
 
@@ -880,6 +889,103 @@ def invite_to_hiking_party(party_id: int, req: HikingPartyInviteRequest, authori
             """, (party_id, invitee["id"], inviter["id"]))
         conn.commit()
         return {"message": "파티 초대를 보냈습니다"}
+    finally:
+        conn.close()
+
+class PartyTransferRequest(BaseModel):
+    username: str = Field(min_length=1, max_length=80)
+
+class PartyScheduleRequest(BaseModel):
+    plan_id: int
+    expected_departure_at: str = Field(default="", max_length=40)
+    expected_mountain_name: str = Field(default="", max_length=120)
+    expected_course_name: str = Field(default="", max_length=180)
+
+@app.post("/api/hiking/parties/{party_id}/schedule")
+def update_party_schedule(party_id: int, req: PartyScheduleRequest, authorization: str | None = Header(default=None)):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            user = _get_token_user(cur, authorization)
+            _ensure_hiking_tables(cur)
+            cur.execute("SELECT * FROM hiking_parties WHERE id = %s FOR UPDATE", (party_id,))
+            party = cur.fetchone()
+            if not party or party['owner_user_id'] != user['id']:
+                raise HTTPException(status_code=403, detail="파티장만 일정을 변경할 수 있습니다")
+            if (party['departure_at'], party['mountain_name'], party['course_name']) != (req.expected_departure_at, req.expected_mountain_name, req.expected_course_name):
+                raise HTTPException(status_code=409, detail="파티 일정이 변경되었습니다. 새로고침 후 다시 확인해 주세요")
+            cur.execute("SELECT * FROM hiking_plans WHERE id = %s AND user_id = %s", (req.plan_id, user['id']))
+            plan = cur.fetchone()
+            if not plan:
+                raise HTTPException(status_code=404, detail="본인의 저장된 계획을 찾을 수 없습니다")
+            old = f"{party['mountain_name']} · {party['course_name']} · {party['departure_at']}"
+            new = f"{plan['mountain_name']} · {plan['course_name']} · {plan['departure_at']}"
+            cur.execute("UPDATE hiking_parties SET plan_id=%s, mountain_name=%s, course_name=%s, weather_date=%s, pace=%s, departure_offset_hours=%s, departure_at=%s WHERE id=%s", (plan['id'], plan['mountain_name'], plan['course_name'], plan['weather_date'], plan['pace'], plan['departure_offset_hours'], plan['departure_at'], party_id))
+            cur.execute("INSERT INTO hiking_party_schedule_log (party_id, actor_name, old_schedule, new_schedule) VALUES (%s,%s,%s,%s)", (party_id, user['name'], old, new))
+        conn.commit()
+        return {"message": "파티 일정을 변경했습니다"}
+    finally:
+        conn.close()
+
+@app.delete("/api/hiking/parties/{party_id}/invites/{invite_id}")
+def cancel_party_invite(party_id: int, invite_id: int, authorization: str | None = Header(default=None)):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            user = _get_token_user(cur, authorization)
+            _ensure_hiking_tables(cur)
+            if _party_member_role(cur, party_id, user['id']) != 'owner':
+                raise HTTPException(status_code=403, detail="파티장만 초대를 취소할 수 있습니다")
+            cur.execute("UPDATE hiking_party_invites SET status='cancelled' WHERE id=%s AND party_id=%s AND status='pending'", (invite_id, party_id))
+            if not cur.rowcount:
+                raise HTTPException(status_code=404, detail="대기 중인 초대가 없습니다")
+        conn.commit()
+        return {"message": "초대를 취소했습니다"}
+    finally:
+        conn.close()
+
+@app.post("/api/hiking/parties/{party_id}/leave")
+def leave_party(party_id: int, authorization: str | None = Header(default=None)):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            user = _get_token_user(cur, authorization)
+            _ensure_hiking_tables(cur)
+            cur.execute("SELECT id, owner_user_id FROM hiking_parties WHERE id=%s FOR UPDATE", (party_id,))
+            party = cur.fetchone()
+            if not party:
+                raise HTTPException(status_code=404, detail="파티를 찾을 수 없습니다")
+            if party['owner_user_id'] == user['id']:
+                raise HTTPException(status_code=409, detail="파티장은 권한을 넘기거나 파티를 삭제해 주세요")
+            _party_member_role(cur, party_id, user['id'])
+            cur.execute("UPDATE hiking_party_items SET assigned_to_user_id=NULL, is_packed=0 WHERE party_id=%s AND assigned_to_user_id=%s", (party_id, user['id']))
+            cur.execute("UPDATE hiking_party_items SET created_by_user_id=%s WHERE party_id=%s AND created_by_user_id=%s", (party['owner_user_id'], party_id, user['id']))
+            cur.execute("DELETE FROM hiking_party_members WHERE party_id=%s AND user_id=%s", (party_id, user['id']))
+        conn.commit()
+        return {"message": "파티에서 나왔습니다"}
+    finally:
+        conn.close()
+
+@app.post("/api/hiking/parties/{party_id}/transfer")
+def transfer_party(party_id: int, req: PartyTransferRequest, authorization: str | None = Header(default=None)):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            user = _get_token_user(cur, authorization)
+            _ensure_hiking_tables(cur)
+            cur.execute("SELECT owner_user_id FROM hiking_parties WHERE id=%s FOR UPDATE", (party_id,))
+            party = cur.fetchone()
+            if not party or party['owner_user_id'] != user['id']:
+                raise HTTPException(status_code=403, detail="파티장만 권한을 넘길 수 있습니다")
+            cur.execute("SELECT u.id FROM users u JOIN hiking_party_members m ON m.user_id=u.id WHERE m.party_id=%s AND u.username=%s", (party_id, req.username.strip()))
+            target = cur.fetchone()
+            if not target or target['id'] == user['id']:
+                raise HTTPException(status_code=400, detail="다른 파티 구성원을 선택해 주세요")
+            cur.execute("UPDATE hiking_party_members SET role='member' WHERE party_id=%s AND user_id=%s", (party_id, user['id']))
+            cur.execute("UPDATE hiking_party_members SET role='owner' WHERE party_id=%s AND user_id=%s", (party_id, target['id']))
+            cur.execute("UPDATE hiking_parties SET owner_user_id=%s, plan_id=NULL WHERE id=%s", (target['id'], party_id))
+        conn.commit()
+        return {"message": "파티장 권한을 넘겼습니다"}
     finally:
         conn.close()
 
@@ -1040,6 +1146,10 @@ def update_user(req: UpdateUserRequest):
             if req.new_password:
                 cur.execute("UPDATE users SET name = %s, password_hash = %s WHERE username = %s",
                             (name, _hash_pw(req.new_password), req.username))
+                cur.execute("SELECT id FROM users WHERE username = %s", (req.username,))
+                uid = cur.fetchone()['id']
+                _ensure_admin_tables(cur)
+                cur.execute("INSERT INTO admin_user_metadata (user_id, token_version) VALUES (%s,1) ON DUPLICATE KEY UPDATE token_version=token_version+1", (uid,))
             else:
                 cur.execute("UPDATE users SET name = %s WHERE username = %s", (name, req.username))
         conn.commit()
@@ -1052,7 +1162,11 @@ def delete_user(req: DeleteUserRequest):
     conn = get_conn()
     try:
         with conn.cursor() as cur:
-            _verify_user(cur, req.username, req.password)
+            user = _verify_user(cur, req.username, req.password)
+            _ensure_hiking_tables(cur)
+            cur.execute("SELECT 1 FROM hiking_party_members WHERE user_id = %s LIMIT 1", (user['id'],))
+            if cur.fetchone():
+                raise HTTPException(status_code=409, detail="회원 탈퇴 전에 참여 중인 파티에서 나가거나 파티장 권한을 넘겨 주세요")
             cur.execute("DELETE FROM users WHERE username = %s", (req.username,))
         conn.commit()
     finally:
@@ -1075,6 +1189,8 @@ def reset_password(req: ResetPasswordRequest):
             user = _verify_user(cur, req.username, req.current_password)
             cur.execute("UPDATE users SET password_hash = %s WHERE id = %s",
                         (_hash_pw(req.new_password), user["id"]))
+            _ensure_admin_tables(cur)
+            cur.execute("INSERT INTO admin_user_metadata (user_id, token_version) VALUES (%s,1) ON DUPLICATE KEY UPDATE token_version=token_version+1", (user['id'],))
         conn.commit()
     finally:
         conn.close()
