@@ -292,21 +292,21 @@ def get_weekly_forecast(lat: float, lon: float):
                 local_forecast_time = utc_forecast_time.astimezone(local_timezone)
             date_str = local_forecast_time.strftime("%Y-%m-%d")
             main_data = item.get("main", {})
-            temp = main_data.get("temp", 20)
-            pop = item.get("pop", 0)
+            temp = main_data.get("temp")
+            pop = item.get("pop")
             weather_list = item.get("weather", [])
             icon = weather_list[0].get("icon", "01d") if weather_list else "01d"
             
-            wind_speed = item.get("wind", {}).get("speed", 0)
-            humidity = main_data.get("humidity", 50)
+            wind_speed = item.get("wind", {}).get("speed")
+            humidity = main_data.get("humidity")
             
             if date_str not in daily_data:
                 daily_data[date_str] = {"temps": [], "pops": [], "icons": [], "winds": [], "hums": []}
-            daily_data[date_str]["temps"].append(temp)
-            daily_data[date_str]["pops"].append(pop)
+            if temp is not None: daily_data[date_str]["temps"].append(temp)
+            if pop is not None: daily_data[date_str]["pops"].append(pop)
             daily_data[date_str]["icons"].append(icon)
-            daily_data[date_str]["winds"].append(wind_speed)
-            daily_data[date_str]["hums"].append(humidity)
+            if wind_speed is not None: daily_data[date_str]["winds"].append(wind_speed)
+            if humidity is not None: daily_data[date_str]["hums"].append(humidity)
         
         result = []
         today_str = datetime.now(local_timezone).strftime("%Y-%m-%d")
@@ -329,11 +329,10 @@ def get_weekly_forecast(lat: float, lon: float):
             winds = d_info["winds"]
             hums = d_info["hums"]
             
-            if not temps: temps = [20]
-            if not pops: pops = [0]
+            if not temps or not pops: continue
             
-            avg_wind = sum(winds) / len(winds) if winds else 0
-            avg_hum = sum(hums) / len(hums) if hums else 50
+            avg_wind = sum(winds) / len(winds) if winds else None
+            avg_hum = sum(hums) / len(hums) if hums else None
             
             max_t = round(max(temps))
             min_t = round(min(temps))
@@ -353,8 +352,8 @@ def get_weekly_forecast(lat: float, lon: float):
                 "temp_min": min_t,
                 "pop": round(max_pop * 100),
                 "icon": rep_icon,
-                "wind_speed": round(avg_wind, 1),
-                "humidity": round(avg_hum)
+                "wind_speed": round(avg_wind, 1) if avg_wind is not None else None,
+                "humidity": round(avg_hum) if avg_hum is not None else None
             })
         return result[:5]
     except Exception as diagnostic_exc:
@@ -381,9 +380,9 @@ def get_air_quality(lat: float, lon: float):
         res = logged_get(
             f"{BASE}/air_pollution",
             params={"lat": lat, "lon": lon, "appid": OWM_API_KEY}, timeout=5)
-        if res.status_code != 200: return {"pm25": 0, "pm10": 0, "level": "점검중"}
+        if res.status_code != 200: return {"pm25": None, "pm10": None, "level": "점검중"}
         data = logged_json(res)
-        if "list" not in data or len(data["list"]) == 0: return {"pm25": 0, "pm10": 0, "level": "점검중"}
+        if "list" not in data or len(data["list"]) == 0: return {"pm25": None, "pm10": None, "level": "점검중"}
         item = data["list"][0]
         components = item.get("components", {})
         pm25 = components.get("pm2_5")
@@ -394,10 +393,10 @@ def get_air_quality(lat: float, lon: float):
         elif pm25 <= 35: level = "보통"
         elif pm25 <= 75: level = "나쁨"
         else: level = "매우나쁨"
-        return {"pm25": round(pm25), "pm10": round(pm10), "level": level}
+        return {"pm25": round(pm25), "pm10": round(pm10) if pm10 is not None else None, "level": level}
     except Exception as diagnostic_exc:
         log_error("weather_fallback", diagnostic_exc, function="get_air_quality")
-        return {"pm25": 0, "pm10": 0, "level": "점검중"}
+        return {"pm25": None, "pm10": None, "level": "점검중"}
 
 MOUNTAINS_DB = {
     "북한산": {
