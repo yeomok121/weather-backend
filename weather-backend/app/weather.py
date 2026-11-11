@@ -539,37 +539,58 @@ def refresh_mountain_catalog():
         if now - _mountain_list_checked_at < _mountain_list_retry_seconds:
             return
         key = os.getenv('MOUNTAIN_LIST_API_KEY', '').strip()
-        _mountain_list_checked_at = now
         if not key:
+            _mountain_list_checked_at = now
             return
         try:
-            response = requests.get(
-                'https://apis.data.go.kr/B553662/top100FamtPlusListBasiInfoService/getTop100FamtPlusListBasiInfoList',
-                params={'serviceKey': unquote(key), 'pageNo': 1, 'numOfRows': 200, 'type': 'json'}, timeout=(5, 10))
-            response.raise_for_status()
-            payload = response.json().get('response', {})
-            if str(payload.get('header', {}).get('resultCode', '')) not in ('00', '0', '0000'):
-                raise ValueError('기관 응답 오류')
-            items = payload.get('body', {}).get('items', {}).get('item', [])
-            if isinstance(items, dict):
-                items = [items]
-            for row in items:
+            # 페이지 크기 제한이나 중복 산명이 있어도 필요한 자료를 순차 조회합니다.
+            for page in range(1, 6):
+                response = requests.get(
+                    'https://apis.data.go.kr/B553662/top100FamtPlusListBasiInfoService/getTop100FamtPlusListBasiInfoList',
+                    params={'serviceKey': unquote(key), 'pageNo': page, 'numOfRows': 100, 'type': 'json'}, timeout=(5, 10))
+                response.raise_for_status()
+                payload = response.json().get('response', {})
+                if str(payload.get('header', {}).get('resultCode', '')) not in ('00', '0', '0000'):
+                    raise ValueError('기관 응답 오류')
+                body = payload.get('body') or {}
+                container = body.get('items') or {}
+                items = container.get('item', []) if isinstance(container, dict) else container
+                if isinstance(items, dict):
+                    items = [items]
+                if not isinstance(items, list) or not items:
+                    break
+                for row in items:
+                    if len(MOUNTAINS_DB) >= 50:
+                        break
+                    if not isinstance(row, dict):
+                        continue
+                    name = str(row.get('frtrlNm') or '').strip()
+                    try:
+                        lat, lon, elevation = float(row['lat']), float(row['lot']), float(row['aslAltide'])
+                    except (KeyError, TypeError, ValueError):
+                        continue
+                    if not name or name in MOUNTAINS_DB or not (33 <= lat <= 39 and 124 <= lon <= 132 and 0 < elevation < 2500):
+                        continue
+                    MOUNTAINS_DB[name] = {
+                        'lat': lat, 'lon': lon, 'elevation': round(elevation), 'peak': '',
+                        'terrain': '', 'difficulty': '', 'region': str(row.get('ctpvNm') or ''),
+                        'course_tip': '코스별 정보는 제공 준비 중입니다. 산행 전 공식 탐방 안내와 통제 정보를 확인하세요.',
+                        'cctv_url': None, 'catalog_source': '한국등산·트레킹지원센터 100대명산플러스',
+                        'course_available': False,
+                    }
                 if len(MOUNTAINS_DB) >= 50:
                     break
-                name = str(row.get('frtrlNm') or '').strip()
+                total = body.get('totalCount')
                 try:
-                    lat, lon, elevation = float(row['lat']), float(row['lot']), float(row['aslAltide'])
-                except (KeyError, TypeError, ValueError):
-                    continue
-                if not name or name in MOUNTAINS_DB or not (33 <= lat <= 39 and 124 <= lon <= 132 and 0 < elevation < 2500):
-                    continue
-                MOUNTAINS_DB[name] = {
-                    'lat': lat, 'lon': lon, 'elevation': round(elevation), 'peak': '',
-                    'terrain': '', 'difficulty': '', 'region': str(row.get('ctpvNm') or ''),
-                    'course_tip': '코스별 정보는 제공 준비 중입니다. 산행 전 공식 탐방 안내와 통제 정보를 확인하세요.',
-                    'cctv_url': None, 'catalog_source': '한국등산·트레킹지원센터 100대명산플러스',
-                    'course_available': False,
-                }
+                    if total is not None and page * 100 >= int(total):
+                        break
+                except (TypeError, ValueError):
+                    pass
+            _mountain_list_checked_at = now
+            if len(MOUNTAINS_DB) < 50:
+                # 부족한 자료는 짧은 간격으로 재시도하되 기존 목록을 유지합니다.
+                _mountain_list_checked_at = now - 540
+
         except (requests.RequestException, ValueError, TypeError, KeyError, AttributeError):
             # 키나 응답 본문을 기록하지 않습니다. 기존 산 목록은 계속 제공합니다.
             _mountain_list_checked_at = now - 540
