@@ -677,6 +677,7 @@ def get_mountain_weather(mountain_name: str):
         "elevation": elevation,
         "mountain_info": {
             "name": mountain_name,
+            "lat": m_info["lat"], "lon": m_info["lon"],
             "elevation": elevation,
             "peak": m_info["peak"],
             "terrain": m_info["terrain"],
