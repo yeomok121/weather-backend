@@ -6,8 +6,19 @@
 |---|---|---|
 | 날씨 | `app/routers/weather.py`, `app/weather.py`, `app/advice.py` | `/api/weather/*`, `/api/location/search` |
 | 산악 | `app/routers/mountain.py`, `app/routers/hiking.py`, `app/mountain_catalog.json` | `/api/mountain/*`, `/api/users/me/hiking-plans`, `/api/hiking/parties/*` |
-| 낚시 | `app/routers/fishing.py`, `app/fishing.py`, `app/marine_integrations.py` | `/api/fishing/summary` |
+| 낚시 | `app/routers/fishing.py`, `app/fishing/` | `/api/fishing/areas`, `/api/fishing/summary` |
 | 관리자 | `app/routers/admin.py`, `app/routers/notices.py` | `/api/admin/*`, `/api/notices` |
+
+## 낚시 백엔드 (`app/fishing/`)
+
+| 파일 | 내용 |
+|---|---|
+| `areas.py` | 선택할 수 있는 해역 목록. 해역 추가는 여기 한 줄만 추가하면 화면에도 나타납니다 |
+| `providers.py` | 기관 API 호출·응답 해석 (해상예보, 부이 관측, 조위). 새 자료는 `fetch_*` 함수로 추가 |
+| `service.py` | 화면용 요약 만들기: 기관 API 동시 호출, 캐시, 기관별 오류 문구 |
+| `cache.py` | 기관 API 응답 메모리 캐시 (해상예보 10분, 부이 5분, 조위 30분) |
+
+관리자용 해양 API 연결 점검(`app/marine_integrations.py`)은 관리자 페이지 담당입니다.
 
 ## 공통 영역 (고치기 전에 팀에 먼저 공유)
 
