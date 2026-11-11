@@ -620,9 +620,17 @@ def refresh_mountain_catalog():
                 # 부족한 자료는 짧은 간격으로 재시도하되 기존 목록을 유지합니다.
                 _mountain_list_checked_at = now - 540
 
-        except (requests.RequestException, ValueError, TypeError, KeyError, AttributeError):
+        except (requests.RequestException, ValueError, TypeError, KeyError, AttributeError) as exc:
             if _mountain_catalog_diagnostics['status'] not in ('http_error', 'provider_error'):
-                _mountain_catalog_diagnostics.update(status='connection_or_format_error', provider_code=None, valid_rows=0)
+                if isinstance(exc, requests.exceptions.Timeout):
+                    reason = 'timeout'
+                elif isinstance(exc, requests.exceptions.ConnectionError):
+                    reason = 'connection_error'
+                elif isinstance(exc, (ValueError, TypeError, KeyError, AttributeError)):
+                    reason = 'invalid_response'
+                else:
+                    reason = 'request_error'
+                _mountain_catalog_diagnostics.update(status=reason, provider_code=None, valid_rows=0)
             # 키나 응답 본문을 기록하지 않습니다. 기존 산 목록은 계속 제공합니다.
             _mountain_list_checked_at = now - 540
 
