@@ -14,6 +14,16 @@ STATIONS = '''# STN_ID LON LAT STN_SP HT STN_KO STN_EN
 
 
 class WindTests(unittest.TestCase):
+    def test_live_sfc_two_line_header(self):
+        text = '''# STN LON LAT STN_SP HT HT_PA HT_TA HT_WD HT_RN STN STN_KO STN_EN
+# ID degree degree -------- m m m m m AD -------------------- --------------------
+90 128.56473 38.25085 35100 17.53 18.73 1.70 10.00 1.40 90 속초 Sokcho
+108 126.9658 37.57142 11101 85.67 86.67 1.50 10.00 0.50 108 서울 Seoul
+'''
+        stations = wind.parse_stations(text)
+        self.assertEqual(stations[108]['name'], '서울')
+        self.assertEqual(stations[90]['lon'], 128.56473)
+
     def setUp(self):
         wind._cache.clear()
         wind._retry_until = 0

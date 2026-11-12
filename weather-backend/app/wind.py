@@ -49,6 +49,10 @@ def parse_stations(text):
     stations = {}
     for line in text.splitlines():
         fields = line.lstrip("# ").split()
+        # The live SFC header splits STN_ID across two comment lines (STN / ID).
+        # Only normalize the first column; a later STN column is the managing office.
+        if fields and fields[0] == "STN" and {"LON", "LAT", "STN_KO"}.issubset(fields):
+            fields[0] = "STN_ID"
         if line.startswith("#") and required.issubset(fields):
             columns = {name: fields.index(name) for name in required}
             continue
