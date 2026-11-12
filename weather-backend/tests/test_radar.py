@@ -48,6 +48,16 @@ class RadarTests(unittest.TestCase):
         self.assertLess(pixels[0] % radar.SIZE, pixels[1] % radar.SIZE)
         self.assertGreater(pixels[0] // radar.SIZE, pixels[2] // radar.SIZE)
 
+    def test_live_coordinate_header_reversal_preserves_body_order(self):
+        # ECHO is nx=3,ny=2. The coordinate header reports 2,3 while its
+        # row-major body still has three longitude values per west-east row.
+        values = np.array([[125, 126, 127], [125.1, 126.1, 127.1]], dtype='<f4')
+        content = struct.pack('<hh', 2, 3) + values.tobytes()
+        grid = radar.decode_grid(content, 'lon', expected_shape=(2, 3))
+        np.testing.assert_array_equal(grid, values)
+        with self.assertRaises(radar.RadarError):
+            radar.decode_grid(content, 'lon', expected_shape=(2, 4))
+
     def test_missing_is_distinct_from_no_echo_and_echo(self):
         grid = np.zeros((4, 4), dtype=np.int16)
         grid[0, 0], grid[0, 2], grid[2, 0], grid[2, 2] = -30000, -25000, 2000, 5000

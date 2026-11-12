@@ -73,7 +73,7 @@ def _fetch(path, **params):
         raise RadarError("기상청 레이더 자료에 연결하지 못했습니다. 다시 시도해 주세요.") from None
 
 
-def decode_grid(content, kind):
+def decode_grid(content, kind, expected_shape=None):
     """The CGI binary format is nx,ny (short), then short ECHO or float coords."""
     itemsize = 2 if kind == "echo" else 4
     for endian in ("<", ">"):
@@ -85,7 +85,15 @@ def decode_grid(content, kind):
         if len(content) != 4 + nx * ny * itemsize:
             continue
         dtype = f"{endian}{'i2' if kind == 'echo' else 'f4'}"
-        grid = np.frombuffer(content, dtype=dtype, offset=4).reshape(ny, nx)
+        shape = (ny, nx)
+        if expected_shape is not None:
+            # The live coordinate CGI reports ny,nx in its header, but its body
+            # still runs west-to-east in nx-wide rows, like the ECHO endpoint.
+            # Normalize only this exact reversal; do not transpose the payload.
+            if shape not in (expected_shape, expected_shape[::-1]):
+                continue
+            shape = expected_shape
+        grid = np.frombuffer(content, dtype=dtype, offset=4).reshape(shape)
         if kind != "echo":
             low, high = (20, 55) if kind == "lat" else (100, 150)
             sample = grid[::100, ::100]
@@ -107,12 +115,12 @@ def _pixel_lookup(shape):
     global _lookup
     if _lookup is not None and _lookup[0] == shape:
         return _lookup[1:]
-    cols = decode_grid(_fetch("nph-rdr_latlon_api", cmp="HSR", latlon="lon", disp="B"), "lon")
+    cols = decode_grid(_fetch("nph-rdr_latlon_api", cmp="HSR", latlon="lon", disp="B"), "lon", shape)
     if cols.shape != shape:
         raise RadarError("레이더 관측 격자와 좌표 격자가 일치하지 않습니다.")
     x = np.floor((cols[::STEP, ::STEP] - 118) / 16 * SIZE).astype(np.int16)
     del cols
-    rows = decode_grid(_fetch("nph-rdr_latlon_api", cmp="HSR", latlon="lat", disp="B"), "lat")
+    rows = decode_grid(_fetch("nph-rdr_latlon_api", cmp="HSR", latlon="lat", disp="B"), "lat", shape)
     if rows.shape != shape:
         raise RadarError("레이더 관측 격자와 좌표 격자가 일치하지 않습니다.")
     north, south = _mercator(44), _mercator(30)
