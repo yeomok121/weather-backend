@@ -95,10 +95,34 @@ class RadarTests(unittest.TestCase):
             response = client.get("/api/weather/radar/frames")
         self.assertEqual(response.status_code, 503)
         self.assertEqual(response.headers["retry-after"], "30")
+        self.assertEqual(response.headers["cache-control"], "no-store")
         with patch.object(radar, "frame", return_value=b"png"):
             response = client.get("/api/weather/radar/frames/202611120900.png")
         self.assertEqual(response.headers["content-type"], "image/png")
         self.assertIn("max-age=3600", response.headers["cache-control"])
+
+    def test_delayed_latest_falls_back_and_reports_actual_time(self):
+        missing = radar.RadarError("not published", 502, "no_data")
+        with patch.object(radar, "_frame", side_effect=[missing, missing, b"png"]) as frame:
+            data = radar.manifest()
+        self.assertEqual(frame.call_count, 3)
+        latest_requested = frame.call_args_list[-1].args[0]
+        self.assertEqual(data["frames"][-1]["id"], latest_requested)
+        self.assertEqual(datetime.fromisoformat(data["latest_at"]).strftime("%Y%m%d%H%M"), latest_requested)
+
+    def test_forbidden_is_not_retried_and_code_survives_cooldown(self):
+        with patch.object(radar, "_frame", side_effect=radar.RadarError("access denied", 503, "provider_forbidden")) as frame:
+            for _ in range(2):
+                with self.assertRaises(radar.RadarError) as caught:
+                    radar.manifest()
+                self.assertEqual(caught.exception.code, "provider_forbidden")
+        self.assertEqual(frame.call_count, 1)
+
+    def test_minimum_reflectivity_is_transparent_and_not_missing(self):
+        grid = np.full((2, 2), -20000, dtype=np.int16)
+        image = radar.render_grid(grid, np.ones((1, 1), dtype=bool), np.array([0]))
+        pixel = Image.open(io.BytesIO(image)).getpixel((0, 0))
+        self.assertEqual(pixel[3], 0)
 
 
 if __name__ == "__main__":

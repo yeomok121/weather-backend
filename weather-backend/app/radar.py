@@ -40,20 +40,27 @@ _last_error = None
 
 
 class RadarError(Exception):
-    def __init__(self, message, status=502):
+    def __init__(self, message, status=502, code="upstream_error"):
         super().__init__(message)
         self.status = status
+        self.code = code
 
 
 def _fetch(path, **params):
     key = os.getenv("KMA_API_HUB_KEY", "").strip()
     if not key:
-        raise RadarError("레이더 연결 설정을 확인하고 있습니다. 잠시 후 다시 시도해 주세요.", 503)
+        raise RadarError("레이더 연결 설정을 확인하고 있습니다. 잠시 후 다시 시도해 주세요.", 503, "not_configured")
     try:
         with requests.get(f"{BASE}/{path}", params={**params, "authKey": key},
                           timeout=(5, 25), stream=True) as response:
             if response.status_code in (401, 403):
-                raise RadarError("레이더 API 활용 승인 또는 인증 설정을 확인해야 합니다.", 503)
+                stage = "강수 관측" if path == "nph-rdr_cmp1_api" else "지도 좌표"
+                raise RadarError(f"기상청이 {stage} 자료 접근을 거절했습니다. 운영자가 API 활용 승인·인증 설정을 확인하고 있습니다.",
+                                 503, "provider_forbidden")
+            if response.status_code == 429:
+                raise RadarError("기상청 레이더 조회 한도에 도달했습니다. 잠시 후 다시 확인해 주세요.", 503, "rate_limited")
+            if response.status_code == 404 and path == "nph-rdr_cmp1_api":
+                raise RadarError("해당 시각의 레이더 관측 자료가 아직 없습니다.", 502, "no_data")
             response.raise_for_status()
             content = bytearray()
             for chunk in response.iter_content(65536):
@@ -85,7 +92,11 @@ def decode_grid(content, kind):
             if not np.all(np.isfinite(sample) & (sample >= low) & (sample <= high)):
                 continue
         return grid
-    raise RadarError("레이더 자료 형식을 확인하지 못했습니다. 관측 자료를 다시 확인해 주세요.")
+    # Known no-data messages can be returned with HTTP 200 instead of a grid.
+    message = content[:2000].decode("utf-8", errors="ignore").lower()
+    if any(marker in message for marker in ("no data", "not found", "자료가 없습니다", "파일이 없습니다")):
+        raise RadarError("해당 시각의 레이더 관측 자료가 아직 없습니다.", 502, "no_data")
+    raise RadarError("레이더 자료 형식을 확인하지 못했습니다. 관측 자료를 다시 확인해 주세요.", 502, "invalid_format")
 
 
 def _mercator(latitude):
@@ -117,7 +128,7 @@ def render_grid(grid, valid, pixels):
     # 0 = no coverage/missing, 1 = no echo/below display threshold, 2..7 = dBZ.
     echo = grid[::STEP, ::STEP][valid]
     levels = np.zeros(echo.shape, dtype=np.uint8)
-    levels[echo > -20000] = 1
+    levels[echo >= -20000] = 1
     levels[echo == -25000] = 1
     observed = echo >= 0
     levels[observed] = np.minimum(echo[observed] // 1000 + 2, 7)
@@ -138,14 +149,14 @@ def _frame(stamp):
         return _frames[stamp]
     failure = _failures.get(stamp)
     if failure is not None and time.monotonic() < failure[0]:
-        raise RadarError(failure[1], failure[2])
+        raise RadarError(failure[1], failure[2], failure[3])
     try:
         grid = decode_grid(_fetch("nph-rdr_cmp1_api", tm=stamp, cmp="HSR", qcd="MSK",
                                  obs="ECHO", map="HB", disp="B"), "echo")
         valid, pixels = _pixel_lookup(grid.shape)
         image = render_grid(grid, valid, pixels)
     except RadarError as error:
-        _failures[stamp] = (time.monotonic() + 30, str(error), error.status)
+        _failures[stamp] = (time.monotonic() + 30, str(error), error.status, error.code)
         while len(_failures) > 25:
             _failures.popitem(last=False)
         raise
@@ -167,9 +178,18 @@ def manifest():
         # Leave ten minutes for provider processing. Never invent a future frame.
         latest = now.replace(second=0, microsecond=0) - timedelta(minutes=now.minute % 5 + 10)
         try:
-            _frame(latest.strftime("%Y%m%d%H%M"))
+            # A missing publication is retried at most twice at older times.
+            # Access denials, quota and format failures are never retried here.
+            for attempt in range(3):
+                try:
+                    _frame(latest.strftime("%Y%m%d%H%M"))
+                    break
+                except RadarError as error:
+                    if error.code != "no_data" or attempt == 2:
+                        raise
+                    latest -= timedelta(minutes=5)
         except RadarError as error:
-            _last_error = (str(error), error.status)
+            _last_error = (str(error), error.status, error.code)
             _retry_after = time.monotonic() + 30
             raise
         times = [latest - timedelta(minutes=minutes) for minutes in range(60, -1, -10)]
@@ -187,9 +207,9 @@ def frame(stamp):
     try:
         observed = datetime.strptime(stamp, "%Y%m%d%H%M").replace(tzinfo=KST)
     except ValueError:
-        raise RadarError("올바른 레이더 관측 시각이 필요합니다.", 400) from None
+        raise RadarError("올바른 레이더 관측 시각이 필요합니다.", 400, "invalid_time") from None
     now = datetime.now(KST)
     if observed.minute % 5 or not now - timedelta(hours=2) <= observed <= now:
-        raise RadarError("최근 2시간 이내의 레이더 관측만 조회할 수 있습니다.", 400)
+        raise RadarError("최근 2시간 이내의 레이더 관측만 조회할 수 있습니다.", 400, "expired_time")
     with _lock:
         return _frame(stamp)
