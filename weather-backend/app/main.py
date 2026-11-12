@@ -17,7 +17,7 @@ from pymysql import err as db_errors
 
 from app.health import router as health_router, monitor_database
 from app.weather_diagnostics import RequestLogMiddleware, log_environment_status, log_error, request_id_var
-from app.routers import admin, auth, fishing, hiking, mountain, notices, radar, weather
+from app.routers import admin, auth, fishing, hiking, mountain, notices, radar, weather, wind
 
 load_dotenv()
 
@@ -73,6 +73,7 @@ def hello():
 # 등록 순서는 기존 main.py의 API 순서와 같게 유지합니다.
 app.include_router(weather.router)
 app.include_router(radar.router)
+app.include_router(wind.router)
 app.include_router(mountain.router)
 app.include_router(fishing.router)
 app.include_router(auth.router)
