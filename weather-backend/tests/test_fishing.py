@@ -5,7 +5,7 @@ from unittest.mock import Mock, patch
 import requests
 from fastapi.testclient import TestClient
 
-from app.fishing import fishing_index, providers, service, tides
+from app.fishing import fishing_index, providers, service, tides, warnings
 from app.fishing.areas import FISHING_AREAS, get_area
 from app.fishing.cache import TTLCache
 from app.main import app
@@ -38,6 +38,20 @@ INDEX_ROWS = [
 ]
 INDEX_JSON = {"header": {"resultCode": "00", "resultMsg": "NORMAL_SERVICE"},
               "body": {"items": {"item": INDEX_ROWS}, "pageNo": 1, "numOfRows": 1000, "totalCount": len(INDEX_ROWS), "type": "json"}}
+# 2026-11-17 실제 특보현황 응답(disp=0, help=1) 일부
+WARNING_TEXT = """#START7777
+#---------------------------------------------------------------------------------------------------
+#  특보현황 조회
+#  7. WRN       : 특보종류
+# REG_UP  REG_UP_KO-------------------------------  REG_ID    REG_KO----------------------------------  TM_FC         TM_EF         WRN     LVL       CMD   ED_TM
+S1320000, 남해서부전해상                          , S1322100, 남해서부서쪽먼바다                      , 202611171700, 202611171900, 풍랑  , 주의    , 발표, 21일 오전(09시~12시),=
+S1310000, 남해동부전해상                          , S1312010, 남해동부안쪽먼바다                      , 202611171600, 202611181758, 풍랑  , 예비    , 발표,  ,=
+S1323000, 제주도앞바다                            , S1323100, 제주도북부앞바다                        , 202611171600, 202611181758, 풍랑  , 예비    , 발표,  ,=
+S1251000, 서해중부앞바다                          , S1251300, 충남북부앞바다                          , 202611171600, 202611181758, 풍랑  , 예비    , 발표,  ,=
+L1030000, 충청남도                                , L1031100, 태안군                                  , 202611171600, 202611181758, 강풍  , 예비    , 발표,  ,=
+L1090000, 제주도                                  , L1091000, 추자도                                  , 202611171600, 202611181758, 강풍  , 예비    , 발표,  ,=
+L1091400, 서귀포시(산지 제외)                     , L1091430, 서귀포시동부                            , 202611171635, 202611171635, 호우  , 주의    , 발표,  ,=
+"""
 TIDE_JSON = {"body": {"items": {"item": [{"obsvtrNm": "추자도", "obsrvnDt": "2099-01-01 13:00", "obsrvnHgt": "150"}]}}}
 
 
@@ -65,6 +79,8 @@ def fake_fetch(calls):
             return json_response(TIDE_JSON)
         if 'fcstFishing' in url:
             return json_response(INDEX_JSON)
+        if url.endswith('wrn_now_data.php'):
+            return text_response(WARNING_TEXT)
         raise AssertionError(url)
     return fetch
 
@@ -99,8 +115,8 @@ class FishingSummaryTests(unittest.TestCase):
             self.summary()
             first = len(calls)
             again = self.summary()
-        self.assertEqual(first, 5)  # 해상예보, 부이, 오늘 조위, 내일 조위, 바다낚시지수
-        self.assertEqual(len(calls), 5)
+        self.assertEqual(first, 6)  # 해상예보, 부이, 오늘 조위, 내일 조위, 바다낚시지수, 기상특보
+        self.assertEqual(len(calls), 6)
         self.assertEqual(len(again['sources']['buoy']['records']), 2)
 
     def test_cached_buoy_rows_are_not_mutated_between_areas(self):
@@ -125,7 +141,8 @@ class FishingSummaryTests(unittest.TestCase):
             raise requests.Timeout('slow')
         with patch.object(providers, '_fetch', side_effect=broken):
             failed = self.summary()
-        self.assertEqual(set(failed['errors']), {'forecast', 'buoy', 'tide', 'fishing_index'})
+        self.assertEqual(set(failed['errors']), {'forecast', 'buoy', 'tide', 'fishing_index', 'warnings'})
+        self.assertIsNone(failed['sources']['warnings']['items'])  # 못 받았으면 '특보 없음'이 아니라 None
         with patch.object(providers, '_fetch', side_effect=fake_fetch([])):
             recovered = self.summary()
         self.assertEqual(recovered['errors'], {})
@@ -188,6 +205,45 @@ class FishingSummaryTests(unittest.TestCase):
         with patch.object(providers, '_fetch', side_effect=fetch):
             result = self.summary()
         self.assertEqual(result['errors'], {'fishing_index': '바다낚시지수를 가져오지 못했습니다.'})
+
+
+    def test_area_warnings_are_matched_and_sorted(self):
+        with patch.object(providers, '_fetch', side_effect=fake_fetch([])):
+            result = self.summary()  # 추자도 해상
+        items = result['sources']['warnings']['items']
+        self.assertEqual([(w['region'], w['title']) for w in items], [
+            ('남해서부서쪽먼바다', '풍랑주의보'), ('추자도', '강풍 예비특보'), ('제주도북부앞바다', '풍랑 예비특보')])
+        self.assertEqual(items[0]['release_hint'], '21일 오전(09시~12시)')
+        self.assertEqual(items[0]['issued_at'], '2026-11-17T17:00+09:00')
+        self.assertEqual(items[0]['effective'], '17일 19:00')
+        self.assertEqual(items[2]['effective'], '18일 오후(12시~18시)')  # 예비특보 약속 시각
+
+    def test_warning_api_not_subscribed_is_an_error(self):
+        def fetch(url, params, timeout=15):
+            if url.endswith('wrn_now_data.php'):
+                return text_response('{ "result" : { "status" : 403, "message" : "활용신청이 필요한 API 입니다." } }')
+            return fake_fetch([])(url, params, timeout)
+        with patch.object(providers, '_fetch', side_effect=fetch):
+            result = self.summary()
+        self.assertEqual(set(result['errors']), {'warnings'})
+        self.assertIsNone(result['sources']['warnings']['items'])
+
+
+class WarningTests(unittest.TestCase):
+    def test_parses_real_format_and_matches_other_areas(self):
+        rows = warnings.parse_warnings(WARNING_TEXT)
+        self.assertEqual(len(rows), 7)
+        self.assertEqual(rows[0]['REG_KO'], '남해서부서쪽먼바다')
+        self.assertEqual(rows[1]['ED_TM'], '')
+        west = warnings.warnings_for_regions(rows, get_area('west')['warning_regions'])
+        self.assertEqual([w['title'] for w in west], ['강풍 예비특보', '풍랑 예비특보'])
+        busan = warnings.warnings_for_regions(rows, get_area('southeast')['warning_regions'])
+        self.assertEqual([w['region'] for w in busan], ['남해동부안쪽먼바다'])
+
+    def test_lifted_warnings_and_empty_keywords_are_ignored(self):
+        rows = warnings.parse_warnings(WARNING_TEXT.replace('풍랑  , 주의    , 발표', '풍랑  , 주의    , 해제'))
+        self.assertNotIn('남해서부서쪽먼바다', [w['region'] for w in warnings.warnings_for_regions(rows, ['남해서부서쪽먼바다'])])
+        self.assertEqual(warnings.warnings_for_regions(rows, ['']), [])
 
 
 class FishingIndexTests(unittest.TestCase):

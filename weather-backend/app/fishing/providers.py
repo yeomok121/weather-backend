@@ -162,3 +162,9 @@ def fetch_fishing_index(gubun: str = "갯바위", page_size: int = 300, max_page
         if not batch or len(items) >= total:
             break
     return items
+
+
+def fetch_warnings_text() -> str:
+    """기상청 특보현황(현재 발효·예고 중인 특보 전체). 해석은 warnings.py에서 합니다."""
+    response = _fetch(f"{KMA_BASE}/wrn_now_data.php", {"fe": "f", "tm": "", "disp": "0", "help": "1", "authKey": kma_key()})
+    return response.text
