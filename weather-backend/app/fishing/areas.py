@@ -8,16 +8,21 @@
   region_name 예보 구역 이름
   lat, lon    부이 거리 계산과 조위 예측에 쓰는 기준 좌표
   tide_system 물때 계산 방식: 7(서해안에서 주로 쓰는 7물때식) 또는 8(남해·동해안 8물때식)
+  warning_regions 기상특보를 보여줄 특보구역 이름(일부만 써도 됨). 바다(앞바다·먼바다)와 가까운 육상 구역
 """
 
 FISHING_AREAS = [
-    {"id": "chuja", "place": "추자도 해상", "region": "12D00000", "region_name": "제주도 전해상", "lat": 33.96194, "lon": 126.44527, "tide_system": 8},
-    {"id": "west", "place": "태안 앞바다", "region": "12A20100", "region_name": "서해중부앞바다", "lat": 36.7, "lon": 126.1, "tide_system": 7},
-    {"id": "southeast", "place": "부산 앞바다", "region": "12B20100", "region_name": "남해동부앞바다", "lat": 35.1, "lon": 129.2, "tide_system": 8},
+    {"id": "chuja", "place": "추자도 해상", "region": "12D00000", "region_name": "제주도 전해상", "lat": 33.96194, "lon": 126.44527, "tide_system": 8,
+     "warning_regions": ["제주도북부앞바다", "남해서부서쪽먼바다", "추자도"]},
+    {"id": "west", "place": "태안 앞바다", "region": "12A20100", "region_name": "서해중부앞바다", "lat": 36.7, "lon": 126.1, "tide_system": 7,
+     "warning_regions": ["충남북부앞바다", "서해중부안쪽먼바다", "태안"]},
+    {"id": "southeast", "place": "부산 앞바다", "region": "12B20100", "region_name": "남해동부앞바다", "lat": 35.1, "lon": 129.2, "tide_system": 8,
+     "warning_regions": ["부산", "남해동부안쪽먼바다"]},
 ]
 
 DEFAULT_AREA_ID = FISHING_AREAS[0]["id"]
 REGION_NAMES = {area["region"]: area["region_name"] for area in FISHING_AREAS}
+WARNING_REGIONS = {area["region"]: area["warning_regions"] for area in FISHING_AREAS}
 
 
 def get_area(area_id: str) -> dict | None:
