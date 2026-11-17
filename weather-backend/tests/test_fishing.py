@@ -5,7 +5,7 @@ from unittest.mock import Mock, patch
 import requests
 from fastapi.testclient import TestClient
 
-from app.fishing import providers, service, tides
+from app.fishing import fishing_index, providers, service, tides
 from app.fishing.areas import FISHING_AREAS, get_area
 from app.fishing.cache import TTLCache
 from app.main import app
@@ -21,6 +21,23 @@ B, 209901011200, 22105, 가까운부이, 126.5, 34.0, 0.8, 30, 3.0, 4.0, 19.0, 1
 B, 209901011200, 22999, 결측부이, 126.4, 33.9, -99, 30, 3.0, 4.0, 19.0, 16.0, 1016, 65
 L, 209901011200, 955, 등표, 126.4, 33.9, 0.5, 30, 3.0, 4.0, 19.0, 16.0, 1016, 65
 """
+def index_row(point, lat, lot, date, noon, species, grade):
+    # 실제 응답(2026-11-17, gubun=갯바위)과 같은 형식
+    return {"seafsPstnNm": point, "lat": lat, "lot": lot, "predcYmd": date, "predcNoonSeCd": noon, "seafsTgfshNm": species,
+            "tdlvHrCn": "소조기", "minWvhgt": 0.6, "maxWvhgt": 0.9, "minWtem": 16.0, "maxWtem": 16.1, "minArtmp": 14.7, "maxArtmp": 16.3,
+            "minCrsp": 0.2, "maxCrsp": 0.6, "minWspd": 7.8, "maxWspd": 10.3, "totalIndex": grade}
+
+
+INDEX_ROWS = [
+    index_row("가거도", 34.07308, 125.08805, "2099-01-01", "오전", "감성돔", "보통"),
+    index_row("추자도", 33.95, 126.30, "2099-01-01", "오후", "참돔", "좋음"),
+    index_row("추자도", 33.95, 126.30, "2099-01-01", "오전", "기타어종", "매우좋음"),
+    index_row("추자도", 33.95, 126.30, "2099-01-01", "오전", "돌돔", "나쁨"),
+    index_row("추자도", 33.95, 126.30, "2099-01-01", "오전", "벵에돔", "매우좋음"),
+    index_row("추자도", 33.95, 126.30, "2099-01-02", "오전", "돌돔", "좋음"),
+]
+INDEX_JSON = {"header": {"resultCode": "00", "resultMsg": "NORMAL_SERVICE"},
+              "body": {"items": {"item": INDEX_ROWS}, "pageNo": 1, "numOfRows": 1000, "totalCount": len(INDEX_ROWS), "type": "json"}}
 TIDE_JSON = {"body": {"items": {"item": [{"obsvtrNm": "추자도", "obsrvnDt": "2099-01-01 13:00", "obsrvnHgt": "150"}]}}}
 
 
@@ -46,11 +63,13 @@ def fake_fetch(calls):
             return text_response(BUOY_TEXT)
         if 'tidebed' in url:
             return json_response(TIDE_JSON)
+        if 'fcstFishing' in url:
+            return json_response(INDEX_JSON)
         raise AssertionError(url)
     return fetch
 
 
-@patch.dict(os.environ, {'KMA_API_HUB_KEY': 'k', 'KHOA_TIDEBED_API_KEY': 't'})
+@patch.dict(os.environ, {'KMA_API_HUB_KEY': 'k', 'KHOA_TIDEBED_API_KEY': 't', 'KHOA_FISHING_API_KEY': 'f'})
 class FishingSummaryTests(unittest.TestCase):
     def setUp(self):
         service.cache.clear()
@@ -80,8 +99,8 @@ class FishingSummaryTests(unittest.TestCase):
             self.summary()
             first = len(calls)
             again = self.summary()
-        self.assertEqual(first, 4)  # 해상예보, 부이, 오늘 조위, 내일 조위
-        self.assertEqual(len(calls), 4)
+        self.assertEqual(first, 5)  # 해상예보, 부이, 오늘 조위, 내일 조위, 바다낚시지수
+        self.assertEqual(len(calls), 5)
         self.assertEqual(len(again['sources']['buoy']['records']), 2)
 
     def test_cached_buoy_rows_are_not_mutated_between_areas(self):
@@ -106,7 +125,7 @@ class FishingSummaryTests(unittest.TestCase):
             raise requests.Timeout('slow')
         with patch.object(providers, '_fetch', side_effect=broken):
             failed = self.summary()
-        self.assertEqual(set(failed['errors']), {'forecast', 'buoy', 'tide'})
+        self.assertEqual(set(failed['errors']), {'forecast', 'buoy', 'tide', 'fishing_index'})
         with patch.object(providers, '_fetch', side_effect=fake_fetch([])):
             recovered = self.summary()
         self.assertEqual(recovered['errors'], {})
@@ -137,6 +156,67 @@ class FishingSummaryTests(unittest.TestCase):
             result = self.summary()
         self.assertEqual(result['errors'], {})
         self.assertEqual(len(result['sources']['tide']['predictions']), 1)
+
+
+    def test_fishing_index_for_nearest_point(self):
+        with patch.object(providers, '_fetch', side_effect=fake_fetch([])):
+            index = self.summary()['sources']['fishing_index']
+        self.assertEqual(index['point']['name'], '추자도')
+        self.assertEqual(index['gubun'], '갯바위')
+        self.assertEqual([day['date'] for day in index['days']], ['2099-01-01', '2099-01-02'])
+        morning, afternoon = index['days'][0]['sessions']
+        self.assertEqual((morning['session'], afternoon['session']), ('오전', '오후'))
+        # 좋은 지수부터, 같은 지수면 기타어종은 뒤로
+        self.assertEqual([(s['name'], s['index']) for s in morning['species']], [('벵에돔', '매우좋음'), ('기타어종', '매우좋음'), ('돌돔', '나쁨')])
+        self.assertEqual(morning['wave_m'], {'min': 0.6, 'max': 0.9})
+        self.assertEqual(morning['tide_phase'], '소조기')
+
+    @patch.dict(os.environ, {'KHOA_FISHING_API_KEY': ''})
+    def test_missing_fishing_index_key_keeps_other_sources(self):
+        calls = []
+        with patch.object(providers, '_fetch', side_effect=fake_fetch(calls)):
+            result = self.summary()
+        self.assertEqual(result['errors'], {'fishing_index': '바다낚시지수 API 설정이 아직 완료되지 않았습니다.'})
+        self.assertFalse(any('fcstFishing' in url for url in calls))
+        self.assertEqual(len(result['sources']['buoy']['records']), 2)
+
+    def test_unsubscribed_fishing_index_response_is_an_error_not_empty_data(self):
+        def fetch(url, params, timeout=15):
+            if 'fcstFishing' in url:
+                return json_response({"result": {"status": 403, "message": "활용신청이 필요한 API 입니다."}})
+            return fake_fetch([])(url, params, timeout)
+        with patch.object(providers, '_fetch', side_effect=fetch):
+            result = self.summary()
+        self.assertEqual(result['errors'], {'fishing_index': '바다낚시지수를 가져오지 못했습니다.'})
+
+
+class FishingIndexTests(unittest.TestCase):
+    def test_reads_all_pages_until_total_count(self):
+        pages = [INDEX_ROWS[:4], INDEX_ROWS[4:]]
+        def fetch(url, params, timeout=15):
+            page = int(params['pageNo'])
+            return json_response({"header": {"resultCode": "00"}, "body": {"items": {"item": pages[page - 1]}, "totalCount": len(INDEX_ROWS)}})
+        with patch.object(providers, '_fetch', side_effect=fetch) as mocked:
+            items = providers.fetch_fishing_index(page_size=4)
+        self.assertEqual(len(items), len(INDEX_ROWS))
+        self.assertEqual(mocked.call_count, 2)
+
+    def test_real_points_match_each_area(self):
+        # 2026-11-17 실제 응답(갯바위, 49개 포인트) 중 해역 근처 포인트 좌표
+        real = [("추자도", 33.96186, 126.30037), ("서망항남측(27km)", 34.119, 126.152), ("모항항", 36.77966, 126.12952),
+                ("안흥항북북서(27km)", 36.9, 126.035), ("부산동부", 35.1851, 129.2288), ("부산남부", 35.0438, 129.0774),
+                ("가거도", 34.07308, 125.08805), ("울릉도", 37.4925, 130.9141)]
+        rows = [{"seafsPstnNm": name, "lat": lat, "lot": lot} for name, lat, lot in real]
+        expected = {"chuja": "추자도", "west": "모항항", "southeast": "부산동부"}
+        for area_id, point in expected.items():
+            area = get_area(area_id)
+            self.assertEqual(fishing_index.summarize(rows, area["lat"], area["lon"])["point"]["name"], point)
+
+    def test_no_point_within_range(self):
+        result = fishing_index.summarize(INDEX_ROWS, 37.5, 129.5)  # 동해, 80km 안에 포인트 없음
+        self.assertIsNone(result['point'])
+        self.assertEqual(result['days'], [])
+        self.assertEqual(len(result['nearby']), 2)
 
 
 class TideTests(unittest.TestCase):
@@ -179,7 +259,7 @@ class TTLCacheTests(unittest.TestCase):
         self.assertEqual(cache.get_or_load('k', 10, loader), (2, False))
 
 
-@patch.dict(os.environ, {'KMA_API_HUB_KEY': 'k', 'KHOA_TIDEBED_API_KEY': 't'})
+@patch.dict(os.environ, {'KMA_API_HUB_KEY': 'k', 'KHOA_TIDEBED_API_KEY': 't', 'KHOA_FISHING_API_KEY': 'f'})
 class FishingApiTests(unittest.TestCase):
     def setUp(self):
         service.cache.clear()
