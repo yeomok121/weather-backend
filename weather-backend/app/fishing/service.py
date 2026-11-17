@@ -14,12 +14,15 @@ import requests
 from app.fishing import providers
 from app.fishing.areas import FISHING_AREAS, REGION_NAMES
 from app.fishing.cache import TTLCache
+from app.fishing import fishing_index
 from app.fishing.tides import find_extremes, normalize_predictions
 
 # 자료별 보관 시간(초). 기관 갱신 주기보다 짧게 잡았습니다.
 FORECAST_TTL_SECONDS = 10 * 60
 BUOY_TTL_SECONDS = 5 * 60
 TIDE_TTL_SECONDS = 30 * 60
+FISHING_INDEX_TTL_SECONDS = 60 * 60  # 바다낚시지수는 하루 몇 차례만 갱신됩니다.
+FISHING_INDEX_GUBUN = "갯바위"
 
 cache = TTLCache()
 
@@ -77,6 +80,12 @@ def _load_tide(lat: float, lon: float, date: str):
     return data
 
 
+def _load_fishing_index(lat: float, lon: float):
+    items, _ = cache.get_or_load(("fishing_index", FISHING_INDEX_GUBUN), FISHING_INDEX_TTL_SECONDS,
+                                 lambda: providers.fetch_fishing_index(FISHING_INDEX_GUBUN))
+    return fishing_index.summarize(items, lat, lon)
+
+
 def get_fishing_summary(place: str, region: str, lat: float = 33.96194, lon: float = 126.44527, area_id: str = "") -> dict:
     now = datetime.now(providers.SEOUL)
     if not providers.kma_key() or not providers.tidebed_key():
@@ -95,6 +104,8 @@ def get_fishing_summary(place: str, region: str, lat: float = 33.96194, lon: flo
         tide_future = executor.submit(copy_context().run, _load_tide, lat, lon, now.strftime("%Y%m%d"))
         # 저녁에도 다음 만조·간조를 보여주려고 내일 조위도 함께 받습니다. (실패해도 오늘 자료는 표시)
         tomorrow_future = executor.submit(copy_context().run, _load_tide, lat, lon, (now + timedelta(days=1)).strftime("%Y%m%d"))
+        # 바다낚시지수는 키가 없어도 나머지 자료는 보여줍니다.
+        index_future = executor.submit(copy_context().run, _load_fishing_index, lat, lon) if providers.fishing_index_key() else None
 
         forecast = []
         try:
@@ -122,6 +133,15 @@ def get_fishing_summary(place: str, region: str, lat: float = 33.96194, lon: flo
         except (ValueError, requests.RequestException):
             pass
 
+        index = {"point": None, "nearby": [], "days": []}
+        if index_future is None:
+            errors["fishing_index"] = "바다낚시지수 API 설정이 아직 완료되지 않았습니다."
+        else:
+            try:
+                index = index_future.result()
+            except (ValueError, requests.RequestException):
+                errors["fishing_index"] = "바다낚시지수를 가져오지 못했습니다."
+
     predictions = normalize_predictions(tide, tide_tomorrow)
 
     return {
@@ -141,6 +161,7 @@ def get_fishing_summary(place: str, region: str, lat: float = 33.96194, lon: flo
                 "predictions": predictions,  # 오늘·내일 1시간 간격 [{time, height_cm, station}]
                 "extremes": find_extremes(predictions),  # 만조·간조 추정 [{type: high|low, time, height_cm}]
             },
+            "fishing_index": {"name": "국립해양조사원 바다낚시지수", "gubun": FISHING_INDEX_GUBUN, **index},
         },
         "errors": errors,
         "notice": "기관 원자료를 표시합니다. 출조 안전 판단은 최신 특보와 현장 상황도 함께 확인하세요.",

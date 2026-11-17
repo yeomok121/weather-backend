@@ -25,6 +25,10 @@ def tidebed_key() -> str:
     return os.getenv("KHOA_TIDEBED_API_KEY", "").strip()
 
 
+def fishing_index_key() -> str:
+    return os.getenv("KHOA_FISHING_API_KEY", "").strip()
+
+
 def _fetch(url: str, params: dict, timeout: int = REQUEST_TIMEOUT_SECONDS) -> requests.Response:
     response = requests.get(url, params=params, timeout=timeout)
     response.raise_for_status()
@@ -129,3 +133,32 @@ def fetch_tide_prediction(lat: float, lon: float, date: str):
         {"reqDate": date, "lot": str(lon), "lat": str(lat), "min": "60", "pageNo": "1", "numOfRows": "24", "type": "json", "serviceKey": tidebed_key()},
     )
     return _safe_json(response)
+
+
+def fetch_fishing_index(gubun: str = "갯바위", page_size: int = 300, max_pages: int = 30) -> list[dict]:
+    """국립해양조사원 바다낚시지수: 전국 포인트의 날짜·오전/오후·어종별 지수 (여러 쪽이면 모두 받음).
+
+    numOfRows=1000은 INVALID_REQUEST_PARAMETER_ERROR가 나고 300은 정상이라 300줄씩 받습니다. (2026-11-17 확인)
+    """
+    items = []
+    for page in range(1, max_pages + 1):
+        response = _fetch(
+            f"{KHOA_BASE}/fcstFishingv2/GetFcstFishingApiServicev2",
+            {"serviceKey": fishing_index_key(), "type": "json", "gubun": gubun, "numOfRows": str(page_size), "pageNo": str(page)},
+            timeout=20,
+        )
+        data = _safe_json(response)
+        header = (data or {}).get("header") if isinstance(data, dict) else None
+        if not header or header.get("resultCode") != "00":
+            raise ValueError("unexpected fishing index response")  # 키 오류·미신청 응답은 형식이 다릅니다.
+        body = data.get("body") or {}
+        batch = (body.get("items") or {}).get("item") or []
+        batch = batch if isinstance(batch, list) else [batch]
+        items.extend(batch)
+        try:
+            total = int(body.get("totalCount") or 0)
+        except (TypeError, ValueError):
+            total = 0
+        if not batch or len(items) >= total:
+            break
+    return items
