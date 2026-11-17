@@ -42,7 +42,7 @@ class RadarTests(unittest.TestCase):
             "lon": binary([[120, 121, 132, 133]] * 4, "lon"),
             "lat": binary([[32] * 4, [33] * 4, [42] * 4, [43] * 4], "lat"),
         }
-        with patch.object(radar, "_fetch", side_effect=lambda path, **params: coords[params["latlon"]]):
+        with patch.object(radar, "STEP", 2), patch.object(radar, "_fetch", side_effect=lambda path, **params: coords[params["latlon"]]):
             valid, pixels = radar._pixel_lookup((4, 4))
         self.assertTrue(valid.all())
         self.assertLess(pixels[0] % radar.SIZE, pixels[1] % radar.SIZE)
@@ -59,8 +59,7 @@ class RadarTests(unittest.TestCase):
             radar.decode_grid(content, 'lon', expected_shape=(2, 4))
 
     def test_missing_is_distinct_from_no_echo_and_echo(self):
-        grid = np.zeros((4, 4), dtype=np.int16)
-        grid[0, 0], grid[0, 2], grid[2, 0], grid[2, 2] = -30000, -25000, 2000, 5000
+        grid = np.array([[-30000, -25000], [2000, 5000]], dtype=np.int16)
         image = radar.render_grid(grid, np.ones((2, 2), dtype=bool), np.array([0, 1, 2, 3]))
         pixels = np.array(Image.open(io.BytesIO(image))).reshape(-1, 4)
         self.assertGreater(pixels[0, 3], 0)
@@ -72,7 +71,7 @@ class RadarTests(unittest.TestCase):
         stamp = (datetime.now(radar.KST) - timedelta(minutes=10)).replace(second=0, microsecond=0)
         stamp -= timedelta(minutes=stamp.minute % 5)
         with patch.object(radar, "_fetch", return_value=binary([[0, 1000], [2000, 3000]])) as fetch:
-            with patch.object(radar, "_pixel_lookup", return_value=(np.ones((1, 1), dtype=bool), np.array([0]))):
+            with patch.object(radar, "_pixel_lookup", return_value=(np.ones((2, 2), dtype=bool), np.arange(4))):
                 first = radar.frame(stamp.strftime("%Y%m%d%H%M"))
                 self.assertEqual(first, radar.frame(stamp.strftime("%Y%m%d%H%M")))
         self.assertEqual(fetch.call_count, 1)
@@ -130,9 +129,17 @@ class RadarTests(unittest.TestCase):
 
     def test_minimum_reflectivity_is_transparent_and_not_missing(self):
         grid = np.full((2, 2), -20000, dtype=np.int16)
-        image = radar.render_grid(grid, np.ones((1, 1), dtype=bool), np.array([0]))
+        image = radar.render_grid(grid, np.ones((2, 2), dtype=bool), np.arange(4))
         pixel = Image.open(io.BytesIO(image)).getpixel((0, 0))
         self.assertEqual(pixel[3], 0)
+
+    def test_unsampled_cells_and_weak_echo_are_preserved(self):
+        grid = np.array([[-25000, 0], [1000, 5000]], dtype=np.int16)
+        image = Image.open(io.BytesIO(radar.render_grid(grid, np.ones((2, 2), dtype=bool), np.arange(4))))
+        self.assertEqual(image.size, (2048, 2048))
+        self.assertEqual(image.getpixel((0, 0))[3], 0)
+        self.assertGreater(image.getpixel((1, 0))[3], 0)
+        self.assertLess(image.getpixel((1, 0))[3], image.getpixel((3, 0))[3])
 
 
 if __name__ == "__main__":

@@ -18,8 +18,8 @@ from PIL import Image
 KST = timezone(timedelta(hours=9))
 BASE = "https://apihub.kma.go.kr/api/typ01/cgi-bin/url"
 BOUNDS = [[30, 118], [44, 134]]
-SIZE = 768
-STEP = 2
+SIZE = 2048
+STEP = 1
 MAX_BYTES = 32_000_000
 LEGEND = [
     {"value": 0, "color": "#55b9f3"},
@@ -144,7 +144,7 @@ def render_grid(grid, valid, pixels):
     np.maximum.at(raster, pixels, levels)
     palette = np.array([
         [110, 122, 140, 48], [0, 0, 0, 0],
-        [85, 185, 243, 170], [33, 199, 203, 180], [55, 191, 100, 185],
+        [85, 185, 243, 80], [33, 199, 203, 115], [55, 191, 100, 155],
         [234, 203, 50, 195], [244, 139, 50, 205], [217, 67, 87, 215],
     ], dtype=np.uint8)
     output = io.BytesIO()
@@ -205,7 +205,7 @@ def manifest():
             "source": "기상청 HSR 합성 관측", "bounds": BOUNDS, "legend": LEGEND,
             "latest_at": latest.isoformat(), "generated_at": now.isoformat(),
             "frames": [{"id": value.strftime("%Y%m%d%H%M"), "observed_at": value.isoformat(),
-                        "path": f"/api/weather/radar/frames/{value:%Y%m%d%H%M}.png"} for value in times],
+                        "path": f"/api/weather/radar/frames/{value:%Y%m%d%H%M}.png?render=2"} for value in times],
         }
         _manifest_until = time.monotonic() + 120
         return _manifest
