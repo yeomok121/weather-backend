@@ -568,3 +568,72 @@ class RenamedPointTests(unittest.TestCase):
         self.assertEqual(points['먼바다포인트']['zone'], '')
         self.assertEqual(summary['region'], '12B10201')
         self.assertEqual(zones.zone_for_point('강릉항북동(2km)')['zone'], '강원중부앞바다')
+
+
+class FetchRetryTests(unittest.TestCase):
+    def ok(self, status=200):
+        response = Mock(status_code=status)
+        response.raise_for_status.side_effect = None if status < 400 else requests.HTTPError(response=response)
+        return response
+
+    @patch.object(providers.time, 'sleep')
+    def test_retries_once_on_timeout_and_server_error(self, sleep):
+        with patch.object(providers.requests, 'get', side_effect=[requests.Timeout('slow'), self.ok()]) as get:
+            self.assertEqual(providers._fetch('https://x', {}).status_code, 200)
+        self.assertEqual(get.call_count, 2)
+        with patch.object(providers.requests, 'get', side_effect=[self.ok(503), self.ok()]) as get:
+            self.assertEqual(providers._fetch('https://x', {}).status_code, 200)
+        self.assertEqual(get.call_count, 2)
+
+    @patch.object(providers.time, 'sleep')
+    def test_gives_up_after_second_failure_and_does_not_retry_client_errors(self, sleep):
+        with patch.object(providers.requests, 'get', side_effect=[requests.Timeout('a'), requests.Timeout('b')]):
+            with self.assertRaises(requests.Timeout):
+                providers._fetch('https://x', {})
+        with patch.object(providers.requests, 'get', side_effect=[self.ok(404)]) as get:
+            with self.assertRaises(requests.HTTPError):
+                providers._fetch('https://x', {})
+        self.assertEqual(get.call_count, 1)
+
+
+@patch.dict(os.environ, {'KMA_API_HUB_KEY': 'k', 'KHOA_TIDEBED_API_KEY': 't', 'KHOA_FISHING_API_KEY': 'f'})
+class TideDaysTests(unittest.TestCase):
+    def setUp(self):
+        service.cache.clear()
+
+    def test_coordinate_search_runs_once_for_today_and_tomorrow(self):
+        calls = []
+        def fetch(url, params, timeout=15):
+            if 'tidebed' in url:
+                calls.append((params['reqDate'], params['lot']))
+                return json_response(TIDE_JSON if float(params['lot']) > 126.33 else TIDE_INVALID)
+            return fake_fetch([])(url, params, timeout)
+        with patch.object(providers, '_fetch', side_effect=fetch):
+            result = service.summary_for_point('추자도')
+        # 오늘: 섬 좌표 거부 → 동쪽 5 km 허용 (2번), 내일: 찾아 둔 좌표로 바로 (1번)
+        self.assertEqual([lot for _, lot in calls], ['126.30000', '126.35000', '126.35000'])
+        self.assertEqual(result['errors'], {})
+
+    def test_today_failure_keeps_tomorrow_and_location(self):
+        today = service.datetime.now(providers.SEOUL).strftime('%Y%m%d')
+        def fetch(url, params, timeout=15):
+            if 'tidebed' in url and params['reqDate'] == today:
+                raise requests.ConnectionError('down')
+            return fake_fetch([])(url, params, timeout)
+        with patch.object(providers, '_fetch', side_effect=fetch), patch.object(service, 'log_error') as logged:
+            result = service.summary_for_point('추자도')
+        self.assertEqual(result['errors'], {'tide': '오늘 조위를 가져오지 못해 내일 예측만 표시합니다.'})
+        self.assertEqual(len(result['sources']['tide']['predictions']), 1)
+        self.assertIsNotNone(result['sources']['tide']['location'])
+        self.assertEqual(logged.call_args_list[0].args[0], 'fishing_tide_failed')
+
+    def test_forecast_failure_is_logged_without_details(self):
+        def fetch(url, params, timeout=15):
+            if url.endswith('fct_afs_do.php'):
+                raise requests.Timeout('slow')
+            return fake_fetch([])(url, params, timeout)
+        with patch.object(providers, '_fetch', side_effect=fetch), patch.object(service, 'log_error') as logged:
+            result = service.summary_for_point('추자도')
+        self.assertIn('forecast', result['errors'])
+        self.assertEqual([c.args[0] for c in logged.call_args_list], ['fishing_forecast_failed'])
+        self.assertEqual(logged.call_args_list[0].kwargs, {'region': '12B10201'})

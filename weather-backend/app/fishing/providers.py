@@ -7,6 +7,7 @@
 
 import os
 import math
+import time
 from datetime import datetime, timedelta, timezone
 
 import requests
@@ -29,10 +30,24 @@ def fishing_index_key() -> str:
     return os.getenv("KHOA_FISHING_API_KEY", "").strip()
 
 
+RETRY_STATUS = {429, 500, 502, 503, 504}
+
+
 def _fetch(url: str, params: dict, timeout: int = REQUEST_TIMEOUT_SECONDS) -> requests.Response:
-    response = requests.get(url, params=params, timeout=timeout)
-    response.raise_for_status()
-    return response
+    """기관 API GET. 시간 초과·연결 오류·일시적 서버 오류(429·5xx)는 1초 뒤 한 번만 다시 시도합니다."""
+    for attempt in (1, 2):
+        try:
+            response = requests.get(url, params=params, timeout=timeout)
+            if response.status_code in RETRY_STATUS and attempt == 1:
+                time.sleep(1)
+                continue
+            response.raise_for_status()
+            return response
+        except (requests.Timeout, requests.ConnectionError):
+            if attempt == 2:
+                raise
+            time.sleep(1)
+    raise RuntimeError("unreachable")
 
 
 def _safe_json(response: requests.Response):

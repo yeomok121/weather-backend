@@ -15,6 +15,7 @@ from app.fishing import providers
 from app.fishing.areas import FISHING_AREAS, REGION_NAMES, WARNING_REGIONS
 from app.fishing.warnings import parse_warnings, warnings_for_regions
 from app.fishing.zones import zone_for_point
+from app.weather_diagnostics import log_error
 from app.fishing.cache import TTLCache
 from app.fishing import fishing_index
 from app.fishing.tides import find_extremes, normalize_predictions
@@ -121,6 +122,23 @@ def _load_tide(lat: float, lon: float, date: str):
     return _fetch_tide_cached(tide_lat, tide_lon, date), (tide_lat, tide_lon)
 
 
+def _load_tide_days(lat: float, lon: float, today: str, tomorrow: str) -> dict:
+    """오늘·내일 조위를 차례로 받습니다. 좌표 찾기는 오늘 조회에서 한 번만 하고 내일은 그 좌표를 씁니다.
+    오늘이 실패해도 내일은 따로 시도합니다."""
+    result = {"today": None, "tomorrow": None, "coords": None, "error": None}
+    try:
+        result["today"], result["coords"] = _load_tide(lat, lon, today)
+    except (ValueError, requests.RequestException) as exc:
+        result["error"] = exc
+        log_error("fishing_tide_failed", exc, day="today")
+    try:
+        result["tomorrow"], coords = _load_tide(lat, lon, tomorrow)
+        result["coords"] = result["coords"] or coords
+    except (ValueError, requests.RequestException) as exc:
+        log_error("fishing_tide_failed", exc, day="tomorrow")
+    return result
+
+
 def _load_fishing_index(lat: float, lon: float):
     return fishing_index.summarize(_load_index_items(), lat, lon)
 
@@ -194,9 +212,9 @@ def get_fishing_summary(place: str, region: str | None, lat: float = 33.96194, l
     with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
         forecast_future = executor.submit(copy_context().run, forecast_task)
         buoy_future = executor.submit(copy_context().run, _load_buoys, lat, lon)
-        tide_future = executor.submit(copy_context().run, _load_tide, lat, lon, now.strftime("%Y%m%d"))
         # 저녁에도 다음 만조·간조를 보여주려고 내일 조위도 함께 받습니다. (실패해도 오늘 자료는 표시)
-        tomorrow_future = executor.submit(copy_context().run, _load_tide, lat, lon, (now + timedelta(days=1)).strftime("%Y%m%d"))
+        tide_future = executor.submit(copy_context().run, _load_tide_days, lat, lon,
+                                      now.strftime("%Y%m%d"), (now + timedelta(days=1)).strftime("%Y%m%d"))
         # 바다낚시지수는 키가 없어도 나머지 자료는 보여줍니다.
         index_future = executor.submit(copy_context().run, _load_fishing_index, lat, lon) if providers.fishing_index_key() else None
         warnings_future = executor.submit(copy_context().run, _load_warnings)
@@ -206,30 +224,26 @@ def get_fishing_summary(place: str, region: str | None, lat: float = 33.96194, l
             region, region_name, forecast = forecast_future.result()
         except LookupError:
             errors["forecast"] = "이 포인트는 해상예보 구역이 아직 설정되지 않았습니다."
-        except (requests.RequestException, RuntimeError, KeyError):
+        except (requests.RequestException, RuntimeError, KeyError) as exc:
+            log_error("fishing_forecast_failed", exc, region=region or "")
             errors["forecast"] = "단기 해상예보를 가져오지 못했습니다. 예보 구역을 확인해 주세요."
 
         buoy = []
         try:
             buoy = buoy_future.result()
-        except requests.RequestException:
+        except requests.RequestException as exc:
+            log_error("fishing_buoy_failed", exc)
             errors["buoy"] = "해양 관측 자료를 가져오지 못했습니다."
 
-        tide, tide_coords = None, None
-        try:
-            tide, tide_coords = tide_future.result()
-        except providers.TideParameterError:
+        tide_days = tide_future.result()
+        tide, tide_tomorrow, tide_coords = tide_days["today"], tide_days["tomorrow"], tide_days["coords"]
+        tide_error = tide_days["error"]
+        if isinstance(tide_error, providers.TideParameterError):
             errors["tide"] = "이 위치 근처에서 조위 예측을 찾지 못했습니다."
-        except ValueError:
+        elif isinstance(tide_error, ValueError):
             errors["tide"] = "조위 API 응답 형식을 읽지 못했습니다."
-        except requests.RequestException:
-            errors["tide"] = "조위 예측을 가져오지 못했습니다."
-
-        tide_tomorrow = None
-        try:
-            tide_tomorrow, _ = tomorrow_future.result()
-        except (ValueError, requests.RequestException):
-            pass
+        elif tide_error is not None:
+            errors["tide"] = "조위 예측을 가져오지 못했습니다." if tide_tomorrow is None else "오늘 조위를 가져오지 못해 내일 예측만 표시합니다."
 
         index = {"point": None, "nearby": [], "days": []}
         if index_future is None:
