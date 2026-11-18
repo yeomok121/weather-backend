@@ -75,3 +75,21 @@ def summarize(items: list[dict], lat: float, lon: float, max_distance_km: float 
         "nearby": nearby,
         "days": [{"date": date, "sessions": day_sessions} for date, day_sessions in days.items()],
     }
+
+
+def today_grades(items: list[dict], now) -> dict:
+    """포인트별 오늘 가장 좋은 지수와 그 시간대. 정오가 지나면 이미 끝난 오전 지수는 빼고 봅니다.
+    반환: {포인트 이름: {"grade": "좋음", "session": "오후"}}"""
+    today = now.strftime("%Y-%m-%d")
+    afternoon = now.hour >= 12
+    best = {}
+    for row in items:
+        name, session, grade = row.get("seafsPstnNm"), row.get("predcNoonSeCd") or "", row.get("totalIndex") or ""
+        if not name or row.get("predcYmd") != today or grade not in GRADE_ORDER:
+            continue
+        if afternoon and session == "오전":
+            continue
+        current = best.get(name)
+        if current is None or _grade_rank(grade) < _grade_rank(current["grade"]):
+            best[name] = {"grade": grade, "session": session}
+    return best

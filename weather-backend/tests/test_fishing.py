@@ -637,3 +637,30 @@ class TideDaysTests(unittest.TestCase):
         self.assertIn('forecast', result['errors'])
         self.assertEqual([c.args[0] for c in logged.call_args_list], ['fishing_forecast_failed'])
         self.assertEqual(logged.call_args_list[0].kwargs, {'region': '12B10201'})
+
+
+class TodayGradeTests(unittest.TestCase):
+    def test_best_grade_today_skips_finished_morning(self):
+        from datetime import datetime
+        rows = [
+            index_row("추자도", 33.95, 126.30, "2099-01-01", "오전", "벵에돔", "매우좋음"),
+            index_row("추자도", 33.95, 126.30, "2099-01-01", "오후", "참돔", "보통"),
+            index_row("추자도", 33.95, 126.30, "2099-01-01", "오후", "돌돔", "나쁨"),
+            index_row("추자도", 33.95, 126.30, "2099-01-02", "일", "돌돔", "매우좋음"),
+            index_row("가거도", 34.07, 125.08, "2099-01-01", "일", "감성돔", "좋음"),
+        ]
+        morning = fishing_index.today_grades(rows, datetime(2099, 1, 1, 9, tzinfo=providers.SEOUL))
+        self.assertEqual(morning["추자도"], {"grade": "매우좋음", "session": "오전"})
+        afternoon = fishing_index.today_grades(rows, datetime(2099, 1, 1, 15, tzinfo=providers.SEOUL))
+        self.assertEqual(afternoon["추자도"], {"grade": "보통", "session": "오후"})
+        self.assertEqual(afternoon["가거도"], {"grade": "좋음", "session": "일"})
+        self.assertEqual(fishing_index.today_grades(rows, datetime(2099, 1, 5, 9, tzinfo=providers.SEOUL)), {})
+
+    @patch.dict(os.environ, {'KMA_API_HUB_KEY': 'k', 'KHOA_TIDEBED_API_KEY': 't', 'KHOA_FISHING_API_KEY': 'f'})
+    def test_points_include_today_grade(self):
+        service.cache.clear()
+        with patch.object(providers, '_fetch', side_effect=fake_fetch([])), \
+             patch.object(service, 'datetime', Mock(now=Mock(return_value=service.datetime(2099, 1, 1, 9, tzinfo=providers.SEOUL)))):
+            points = {p['id']: p for p in service.get_fishing_points()}
+        self.assertEqual((points['추자도']['today_grade'], points['추자도']['today_session']), ('매우좋음', '오전'))
+        self.assertEqual(points['가거도']['today_grade'], '보통')

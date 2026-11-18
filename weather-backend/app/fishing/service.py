@@ -153,8 +153,10 @@ def get_fishing_points() -> list[dict]:
     """바다낚시지수 포인트 목록 + 바다 구역 연결 (지도·목록에서 고르기용)."""
     if not providers.fishing_index_key():
         raise RuntimeError("바다낚시지수 API 설정이 아직 완료되지 않았습니다.")
-    catalog = fishing_index.list_points(_load_index_items(), 0, 0)
+    items = _load_index_items()
+    catalog = fishing_index.list_points(items, 0, 0)
     known = [point for point in catalog if zone_for_point(point["name"])]
+    grades = fishing_index.today_grades(items, datetime.now(providers.SEOUL))
     points = []
     for point in catalog:
         zone_from = point["name"] if zone_for_point(point["name"]) else _nearest_zoned_name(point, known)
@@ -165,6 +167,9 @@ def get_fishing_points() -> list[dict]:
             "region_name": zone["forecast_name"] if zone else "", "tide_system": zone["tide_system"] if zone else 8,
             # 연결표에 없는 포인트(이름이 바뀐 경우 등)는 가까운 포인트의 구역을 이어받습니다.
             "zone_from": zone_from or "",
+            # 오늘 남은 시간대 중 가장 좋은 바다낚시지수 (목록에 작게 표시)
+            "today_grade": grades.get(point["name"], {}).get("grade", ""),
+            "today_session": grades.get(point["name"], {}).get("session", ""),
         })
     sea_order = {"서해": 0, "남해": 1, "제주": 2, "동해": 3}
     return sorted(points, key=lambda item: (sea_order.get(item["sea"], 9), item["name"]))
