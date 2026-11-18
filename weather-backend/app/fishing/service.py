@@ -35,7 +35,7 @@ def summary_for_point(point_id: str) -> dict | None:
     point = get_point(point_id)
     if point is None:
         return None
-    zone = zone_for_point(point_id)
+    zone = zone_for_point(point["zone_from"]) if point.get("zone_from") else None
     return get_fishing_summary(
         place=point["name"], region=zone["forecast_reg"] if zone else None, lat=point["lat"], lon=point["lon"],
         warning_regions=zone["warning_regions"] if zone else [], region_name=zone["forecast_name"] if zone else "",
@@ -92,7 +92,7 @@ def _load_buoys(lat: float, lon: float) -> list[dict]:
     return buoy[:8]
 
 
-def _load_tide(lat: float, lon: float, date: str):
+def _fetch_tide_cached(lat: float, lon: float, date: str):
     def load():
         data = providers.fetch_tide_prediction(lat, lon, date)
         if data is None:
@@ -100,6 +100,25 @@ def _load_tide(lat: float, lon: float, date: str):
         return data
     data, _ = cache.get_or_load(("tide", date, round(lat, 4), round(lon, 4)), TIDE_TTL_SECONDS, load)
     return data
+
+
+# 포인트가 섬·육지 위라 조위 예측이 거부되면 바다 쪽으로 조금씩(약 5·10·20 km) 옮겨 다시 찾습니다.
+TIDE_OFFSETS = [(0.0, 0.0)] + [(step * dlat, step * dlon) for step in (0.05, 0.1, 0.2)
+                               for dlat, dlon in ((0, 1), (0, -1), (1, 0), (-1, 0))]
+
+
+def _load_tide(lat: float, lon: float, date: str):
+    """(조위 응답, 실제로 조회한 좌표). 찾은 좌표는 하루 동안 기억해 다음 조회와 내일 자료에 씁니다."""
+    def find_coords():
+        for dlat, dlon in TIDE_OFFSETS:
+            try:
+                _fetch_tide_cached(lat + dlat, lon + dlon, date)
+                return round(lat + dlat, 5), round(lon + dlon, 5)
+            except providers.TideParameterError:
+                continue
+        raise providers.TideParameterError("no tide prediction near this point")
+    (tide_lat, tide_lon), _ = cache.get_or_load(("tide_coords", round(lat, 4), round(lon, 4)), 24 * 3600, find_coords)
+    return _fetch_tide_cached(tide_lat, tide_lon, date), (tide_lat, tide_lon)
 
 
 def _load_fishing_index(lat: float, lon: float):
@@ -116,16 +135,31 @@ def get_fishing_points() -> list[dict]:
     """바다낚시지수 포인트 목록 + 바다 구역 연결 (지도·목록에서 고르기용)."""
     if not providers.fishing_index_key():
         raise RuntimeError("바다낚시지수 API 설정이 아직 완료되지 않았습니다.")
+    catalog = fishing_index.list_points(_load_index_items(), 0, 0)
+    known = [point for point in catalog if zone_for_point(point["name"])]
     points = []
-    for point in fishing_index.list_points(_load_index_items(), 0, 0):
-        zone = zone_for_point(point["name"])
+    for point in catalog:
+        zone_from = point["name"] if zone_for_point(point["name"]) else _nearest_zoned_name(point, known)
+        zone = zone_for_point(zone_from) if zone_from else None
         points.append({
             "id": point["name"], "name": point["name"], "lat": point["lat"], "lon": point["lon"],
             "sea": zone["sea"] if zone else "", "zone": zone["zone"] if zone else "",
             "region_name": zone["forecast_name"] if zone else "", "tide_system": zone["tide_system"] if zone else 8,
+            # 연결표에 없는 포인트(이름이 바뀐 경우 등)는 가까운 포인트의 구역을 이어받습니다.
+            "zone_from": zone_from or "",
         })
     sea_order = {"서해": 0, "남해": 1, "제주": 2, "동해": 3}
     return sorted(points, key=lambda item: (sea_order.get(item["sea"], 9), item["name"]))
+
+
+NEAREST_ZONE_KM = 30
+
+
+def _nearest_zoned_name(point: dict, known: list[dict]) -> str | None:
+    best = min(known, key=lambda other: providers.distance_km(point["lat"], point["lon"], other["lat"], other["lon"]), default=None)
+    if best is None or providers.distance_km(point["lat"], point["lon"], best["lat"], best["lon"]) > NEAREST_ZONE_KM:
+        return None
+    return best["name"]
 
 
 def get_point(point_id: str) -> dict | None:
@@ -181,9 +215,11 @@ def get_fishing_summary(place: str, region: str | None, lat: float = 33.96194, l
         except requests.RequestException:
             errors["buoy"] = "해양 관측 자료를 가져오지 못했습니다."
 
-        tide = None
+        tide, tide_coords = None, None
         try:
-            tide = tide_future.result()
+            tide, tide_coords = tide_future.result()
+        except providers.TideParameterError:
+            errors["tide"] = "이 위치 근처에서 조위 예측을 찾지 못했습니다."
         except ValueError:
             errors["tide"] = "조위 API 응답 형식을 읽지 못했습니다."
         except requests.RequestException:
@@ -191,7 +227,7 @@ def get_fishing_summary(place: str, region: str | None, lat: float = 33.96194, l
 
         tide_tomorrow = None
         try:
-            tide_tomorrow = tomorrow_future.result()
+            tide_tomorrow, _ = tomorrow_future.result()
         except (ValueError, requests.RequestException):
             pass
 
@@ -231,6 +267,11 @@ def get_fishing_summary(place: str, region: str | None, lat: float = 33.96194, l
             "tide": {
                 "name": "국립해양조사원 TideBED 예측 조위",
                 "data": tide,  # 오늘 원자료 (예전 화면 호환용)
+                # 포인트가 섬 위라 바다 쪽으로 옮겨 조회했으면 그 좌표와 거리 (화면 안내용)
+                "location": None if tide_coords is None else {
+                    "lat": tide_coords[0], "lon": tide_coords[1],
+                    "shifted_km": providers.distance_km(lat, lon, tide_coords[0], tide_coords[1]),
+                },
                 "station": next((point["station"] for point in predictions if point["station"]), ""),
                 "predictions": predictions,  # 오늘·내일 1시간 간격 [{time, height_cm, station}]
                 "extremes": find_extremes(predictions),  # 만조·간조 추정 [{type: high|low, time, height_cm}]

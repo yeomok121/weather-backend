@@ -503,3 +503,68 @@ class FishingFavoritesApiTests(unittest.TestCase):
 def HTTPException_401(cur, auth):
     from fastapi import HTTPException
     raise HTTPException(status_code=401, detail="로그인이 필요합니다")
+
+
+TIDE_INVALID = {"header": {"resultCode": "10", "resultMsg": "INVALID_REQUEST_PARAMETER_ERROR"}}  # 2026-11-18 추자도 섬 좌표 실제 응답
+
+
+@patch.dict(os.environ, {'KMA_API_HUB_KEY': 'k', 'KHOA_TIDEBED_API_KEY': 't', 'KHOA_FISHING_API_KEY': 'f'})
+class TideLocationTests(unittest.TestCase):
+    def setUp(self):
+        service.cache.clear()
+
+    def run_with_tide(self, accept):
+        tide_calls = []
+        def fetch(url, params, timeout=15):
+            if 'tidebed' in url:
+                tide_calls.append((params['lat'], params['lot']))
+                return json_response(TIDE_JSON if accept(float(params['lat']), float(params['lot'])) else TIDE_INVALID)
+            return fake_fetch([])(url, params, timeout)
+        with patch.object(providers, '_fetch', side_effect=fetch):
+            result = service.summary_for_point('추자도')
+        return result, tide_calls
+
+    def test_island_point_moves_toward_sea_until_tide_is_found(self):
+        result, calls = self.run_with_tide(lambda lat, lon: lon > 126.33)  # 섬 위(126.30)는 거부, 약 4.6 km 동쪽은 허용
+        self.assertEqual(result['errors'], {})
+        self.assertEqual(len(result['sources']['tide']['predictions']), 1)
+        location = result['sources']['tide']['location']
+        self.assertEqual((location['lat'], location['lon']), (33.95, 126.35))
+        self.assertAlmostEqual(location['shifted_km'], 4.6, delta=0.2)
+        self.assertEqual(calls[0], ('33.95000', '126.30000'))
+        # 다음 조회는 찾아 둔 좌표를 바로 씀
+        _, again = self.run_with_tide(lambda lat, lon: lon > 126.33)
+        self.assertEqual(again, [])
+
+    def test_no_valid_tide_location_is_reported_not_silently_empty(self):
+        result, calls = self.run_with_tide(lambda lat, lon: False)
+        self.assertEqual(result['errors'], {'tide': '이 위치 근처에서 조위 예측을 찾지 못했습니다.'})
+        self.assertEqual(len(calls), len(service.TIDE_OFFSETS) * 2)  # 오늘·내일 모두 시도했지만 모두 거부
+        self.assertIsNone(result['sources']['tide']['location'])
+
+    def test_tide_error_code_is_not_treated_as_success(self):
+        with patch.object(providers, '_fetch', return_value=json_response({"header": {"resultCode": "30", "resultMsg": "SERVICE_KEY_IS_NOT_REGISTERED_ERROR"}})):
+            with self.assertRaises(ValueError):
+                providers.fetch_tide_prediction(33.9, 126.3, '20991231')
+
+
+@patch.dict(os.environ, {'KMA_API_HUB_KEY': 'k', 'KHOA_TIDEBED_API_KEY': 't', 'KHOA_FISHING_API_KEY': 'f'})
+class RenamedPointTests(unittest.TestCase):
+    def setUp(self):
+        service.cache.clear()
+
+    def test_unknown_point_inherits_nearest_zone_within_30km(self):
+        renamed = dict(INDEX_ROWS[1], seafsPstnNm='추자도신항(1km)', lat=33.97, lot=126.31)   # 추자도에서 약 1 km
+        far = dict(INDEX_ROWS[1], seafsPstnNm='먼바다포인트', lat=35.5, lot=124.5)
+        def fetch(url, params, timeout=15):
+            if 'fcstFishing' in url:
+                rows = INDEX_ROWS + [renamed, far]
+                return json_response({"header": {"resultCode": "00"}, "body": {"items": {"item": rows}, "totalCount": len(rows)}})
+            return fake_fetch([])(url, params, timeout)
+        with patch.object(providers, '_fetch', side_effect=fetch):
+            points = {p['id']: p for p in service.get_fishing_points()}
+            summary = service.summary_for_point('추자도신항(1km)')
+        self.assertEqual((points['추자도신항(1km)']['zone'], points['추자도신항(1km)']['zone_from']), ('남해서부서쪽먼바다', '추자도'))
+        self.assertEqual(points['먼바다포인트']['zone'], '')
+        self.assertEqual(summary['region'], '12B10201')
+        self.assertEqual(zones.zone_for_point('강릉항북동(2km)')['zone'], '강원중부앞바다')

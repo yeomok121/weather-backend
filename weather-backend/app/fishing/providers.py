@@ -126,13 +126,23 @@ def fetch_buoy_observations() -> list[dict]:
     return [row for row in buoy if row.get("TP") == "B" and row.get("WH") not in (None, "-99", "-99.0")]
 
 
+class TideParameterError(ValueError):
+    """TideBED가 이 좌표를 받지 않음 (예: 섬·육지 위 좌표 → INVALID_REQUEST_PARAMETER_ERROR)."""
+
+
 def fetch_tide_prediction(lat: float, lon: float, date: str):
-    """국립해양조사원 TideBED 예측 조위 (1시간 간격). 응답을 읽지 못하면 None."""
+    """국립해양조사원 TideBED 예측 조위 (1시간 간격). 응답을 읽지 못하면 None, 기관 오류 코드면 예외."""
     response = _fetch(
         f"{KHOA_BASE}/tidebed/GetTidebedApiService",
-        {"reqDate": date, "lot": str(lon), "lat": str(lat), "min": "60", "pageNo": "1", "numOfRows": "24", "type": "json", "serviceKey": tidebed_key()},
+        {"reqDate": date, "lot": f"{lon:.5f}", "lat": f"{lat:.5f}", "min": "60", "pageNo": "1", "numOfRows": "24", "type": "json", "serviceKey": tidebed_key()},
     )
-    return _safe_json(response)
+    data = _safe_json(response)
+    header = data.get("header") if isinstance(data, dict) else None
+    if isinstance(header, dict) and header.get("resultCode") not in (None, "00"):
+        if header.get("resultCode") == "10" or "PARAMETER" in str(header.get("resultMsg", "")):
+            raise TideParameterError(header.get("resultMsg") or "invalid tide parameter")
+        raise ValueError(f"tide API error {header.get('resultCode')}")
+    return data
 
 
 def fetch_fishing_index(gubun: str = "갯바위", page_size: int = 300, max_pages: int = 30) -> list[dict]:
