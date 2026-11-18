@@ -216,14 +216,21 @@ def admin_audit(x_admin_password: str | None = Header(default=None), authorizati
     finally:
         conn.close()
 
+SEARCH_TABLES = {
+    "mountain": "mountain_search_events",
+    "weather": "weather_search_events",
+    "fishing": "fishing_search_events",
+}
+
 class MountainSearchEvent(BaseModel):
+    service: Literal["mountain", "weather", "fishing"] = "mountain"
     term: str = Field(max_length=40)
-    outcome: Literal["course", "no_course", "not_found", "error"]
+    outcome: Literal["course", "no_course", "not_found", "error", "found"]
 
 
-def _prepare_search_events(cur):
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS mountain_search_events (
+def _prepare_search_events(cur, table):
+    cur.execute(f"""
+        CREATE TABLE IF NOT EXISTS {table} (
             id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
             term VARCHAR(40) NOT NULL,
             outcome VARCHAR(16) NOT NULL,
@@ -231,23 +238,33 @@ def _prepare_search_events(cur):
             INDEX ix_mountain_search_time (searched_at)
         ) DEFAULT CHARSET=utf8mb4
     """)
-    cur.execute("DELETE FROM mountain_search_events WHERE searched_at < UTC_TIMESTAMP() - INTERVAL 30 DAY")
+    cur.execute(f"DELETE FROM {table} WHERE searched_at < UTC_TIMESTAMP() - INTERVAL 30 DAY")
 
 
+@router.post("/api/search-events", status_code=204)
 @router.post("/api/mountain/search-events", status_code=204)
 def record_mountain_search(event: MountainSearchEvent):
     term = " ".join(event.term.split())
-    if not re.fullmatch(r"[가-힣 ]{2,24}", term):
-        return
-    # Only retain mountain-like names for unrecognized search input.
-    if event.outcome in ("not_found", "error") and not term.endswith(("산", "봉", "악", "오름")):
-        return
+    if event.service == "mountain":
+        if not re.fullmatch(r"[가-힣 ]{2,24}", term):
+            return
+        if event.outcome in ("not_found", "error") and not term.endswith(("산", "봉", "악", "오름")):
+            return
+    elif event.service == "weather":
+        if not re.fullmatch(r"[가-힣 ]{2,24}", term):
+            return
+        if event.outcome != "found" and not term.endswith(("시", "군", "구", "읍", "면", "동", "리", "도")):
+            return
+    else:
+        if event.outcome != "found" or not re.fullmatch(r"[가-힣 ]{2,24}(?:\([0-9]{1,3}km\))?", term):
+            return
+    table = SEARCH_TABLES[event.service]
     conn = get_conn()
     try:
         with conn.cursor() as cur:
-            _prepare_search_events(cur)
+            _prepare_search_events(cur, table)
             cur.execute(
-                "INSERT INTO mountain_search_events (term, outcome, searched_at) VALUES (%s, %s, UTC_TIMESTAMP())",
+                f"INSERT INTO {table} (term, outcome, searched_at) VALUES (%s, %s, UTC_TIMESTAMP())",
                 (term, event.outcome),
             )
         conn.commit()
@@ -255,27 +272,30 @@ def record_mountain_search(event: MountainSearchEvent):
         conn.close()
 
 
+@router.get("/api/admin/searches")
 @router.get("/api/admin/mountain-searches")
 def list_mountain_searches(
+    service: Literal["mountain", "weather", "fishing"] = "mountain",
     days: int = Query(default=7),
-    outcome: Literal["all", "course", "no_course", "not_found", "error"] = "all",
+    outcome: Literal["all", "course", "no_course", "not_found", "error", "found"] = "all",
     x_admin_password: str | None = Header(default=None),
     authorization: str | None = Header(default=None),
 ):
     require_admin(x_admin_password, authorization, "system")
+    table = SEARCH_TABLES[service]
     if days not in (7, 30):
         raise HTTPException(status_code=422, detail="7일 또는 30일을 선택하세요.")
     conn = get_conn()
     try:
         with conn.cursor() as cur:
-            _prepare_search_events(cur)
+            _prepare_search_events(cur, table)
             window = "searched_at >= UTC_TIMESTAMP() - INTERVAL %s DAY"
-            cur.execute(f"SELECT outcome, COUNT(*) AS count FROM mountain_search_events WHERE {window} GROUP BY outcome", (days,))
+            cur.execute(f"SELECT outcome, COUNT(*) AS count FROM {table} WHERE {window} GROUP BY outcome", (days,))
             totals = {row["outcome"]: row["count"] for row in cur.fetchall()}
             rankings = {}
-            for status in ("not_found", "no_course"):
+            for status in ("not_found", "no_course", "found"):
                 cur.execute(f"""
-                    SELECT term, COUNT(*) AS count FROM mountain_search_events
+                    SELECT term, COUNT(*) AS count FROM {table}
                     WHERE {window} AND outcome = %s
                     GROUP BY term ORDER BY count DESC, term LIMIT 10
                 """, (days, status))
@@ -284,7 +304,7 @@ def list_mountain_searches(
             args = (days,) if outcome == "all" else (days, outcome)
             cur.execute(f"""
                 SELECT id, term, outcome, CONCAT(DATE_FORMAT(searched_at, '%%Y-%%m-%%dT%%H:%%i:%%s'), 'Z') AS searched_at
-                FROM mountain_search_events WHERE {window}{condition}
+                FROM {table} WHERE {window}{condition}
                 ORDER BY searched_at DESC, id DESC LIMIT 100
             """, args)
             recent = cur.fetchall()
