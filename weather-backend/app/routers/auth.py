@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 from app.database import get_conn
 from app.core.auth import (
     AUTH_TOKEN_TTL_SECONDS, SignUpRequest, LoginRequest,
-    _validate_username, _validate_password_username, _lock_username_changes,
+    _validate_new_username, _validate_password_username, _lock_username_changes,
     _auth_signing_key, _create_access_token, _get_token_user, _hash_pw, _verify_user,
 )
 from app.core.schema import _ensure_admin_tables, _ensure_user_favorites_table, _ensure_hiking_tables
@@ -18,7 +18,7 @@ router = APIRouter()
 
 @router.get('/api/auth/username-availability')
 def username_availability(username: str):
-    username = _validate_username(username)
+    username = _validate_new_username(username)
     conn = get_conn()
     try:
         with conn.cursor() as cur:
@@ -41,7 +41,7 @@ def auth_status():
 def signup(req: SignUpRequest):
     # Do not create accounts that cannot sign in because the token key is missing.
     _auth_signing_key()
-    req.username = _validate_username(req.username)
+    req.username = _validate_new_username(req.username)
     if len(req.password) < 4 or not req.name.strip():
         raise HTTPException(status_code=400, detail="입력값을 확인해주세요")
     _validate_password_username(req.username, req.password)

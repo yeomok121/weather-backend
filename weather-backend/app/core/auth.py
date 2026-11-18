@@ -3,6 +3,7 @@
 여러 라우터(auth, hiking, admin)가 함께 사용합니다. 수정할 때는 팀에 먼저 공유해 주세요.
 """
 import os
+import re
 import hmac
 import base64
 import json
@@ -32,6 +33,13 @@ def _validate_username(username: str) -> str:
     if len(username) < 4 or len(username) > 80:
         raise HTTPException(status_code=400, detail='아이디는 4~80자로 입력해주세요')
     return username
+
+def _validate_new_username(username: str) -> str:
+    username = username.strip()
+    if not re.fullmatch(r"[A-Za-z0-9]{4,20}", username) or not re.search(r"[A-Za-z]", username) or not re.search(r"[0-9]", username):
+        raise HTTPException(status_code=400, detail="아이디는 영문과 숫자를 모두 포함한 4~20자여야 합니다")
+    return username
+
 
 def _validate_password_username(username: str, password: str):
     normalized_id = unicodedata.normalize('NFKC', username).casefold()

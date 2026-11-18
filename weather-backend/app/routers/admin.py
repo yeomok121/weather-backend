@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 
 from app.database import get_conn
 from app.core.auth import (
-    SignUpRequest, _validate_username, _validate_password_username,
+    SignUpRequest, _validate_new_username, _validate_username, _validate_password_username,
     _lock_username_changes, _get_token_user, _hash_pw,
 )
 from app.core.schema import _ensure_admin_tables, _ensure_user_favorites_table, _ensure_hiking_tables
@@ -102,7 +102,7 @@ def admin_user_summary(user_id: int, x_admin_password: str | None = Header(defau
 @router.post("/api/admin/users")
 def admin_create_user(req: SignUpRequest, x_admin_password: str | None = Header(default=None), authorization: str | None = Header(default=None)):
     actor = require_admin(x_admin_password, authorization, 'members')
-    req.username = _validate_username(req.username)
+    req.username = _validate_new_username(req.username)
     if len(req.password) < 4 or not req.name.strip():
         raise HTTPException(status_code=400, detail="입력값을 확인해주세요")
     _validate_password_username(req.username, req.password)
@@ -140,8 +140,10 @@ def admin_update_user(user_id: int, req: AdminUserUpdate, x_admin_password: str 
             _ensure_admin_tables(cur)
             _lock_username_changes(cur)
             target = _require_manage_target(cur, actor, user_id)
-            if req.username != target['username'] and not req.password:
-                raise HTTPException(status_code=400, detail='아이디를 변경할 때 새 비밀번호도 입력해주세요')
+            if req.username != target['username']:
+                _validate_new_username(req.username)
+                if not req.password:
+                    raise HTTPException(status_code=400, detail='아이디를 변경할 때 새 비밀번호도 입력해주세요')
             cur.execute("SELECT id FROM users WHERE username = %s AND id <> %s", (req.username, user_id))
             if cur.fetchone():
                 raise HTTPException(status_code=409, detail="이미 사용 중인 아이디입니다")
