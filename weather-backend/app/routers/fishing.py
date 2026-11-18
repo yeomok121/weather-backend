@@ -5,7 +5,7 @@ from pydantic import BaseModel
 from app.fishing import get_fishing_areas, get_fishing_summary
 from app.fishing.service import get_fishing_points, get_point_index, summary_for_point
 from app.fishing.areas import get_area
-from app.fishing import favorites
+from app.fishing import favorites, gear
 from app.core.auth import _get_token_user
 from app.database import get_conn
 
@@ -104,3 +104,43 @@ def replace_my_fishing_points(req: FishingPointsRequest, authorization: str | No
     finally:
         conn.close()
     return {"message": "즐겨찾는 낚시 포인트를 계정에 저장했습니다", "points": names}
+
+
+class GearItem(BaseModel):
+    id: str
+    name: str
+    note: str = ""
+
+
+class GearSetupRequest(BaseModel):
+    items: list[GearItem] = []
+    hidden: list[str] = []
+
+
+@router.get("/api/users/me/fishing-gear")
+def get_my_fishing_gear(authorization: str | None = Header(default=None)):
+    """로그인한 사용자의 '내 준비물' 세팅: 직접 추가한 항목과 숨긴 기본 항목 id."""
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            user = _get_token_user(cur, authorization)
+            return gear.get_setup(cur, user["id"])
+    finally:
+        conn.close()
+
+
+@router.put("/api/users/me/fishing-gear")
+def replace_my_fishing_gear(req: GearSetupRequest, authorization: str | None = Header(default=None)):
+    try:
+        setup = gear.clean_setup([item.model_dump() for item in req.items], req.hidden)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            user = _get_token_user(cur, authorization)
+            gear.save_setup(cur, user["id"], setup)
+        conn.commit()
+    finally:
+        conn.close()
+    return {"message": "내 준비물을 계정에 저장했습니다", **setup}

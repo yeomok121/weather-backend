@@ -500,6 +500,67 @@ class FishingFavoritesApiTests(unittest.TestCase):
         self.assertEqual(self.call('GET', user=None).status_code, 401)
 
 
+
+class GearCursor:
+    """user_fishing_gear 용 가짜 커서: {user_id: setup_json}"""
+    def __init__(self, store):
+        self.store, self.row = store, None
+    def __enter__(self):
+        return self
+    def __exit__(self, *exc):
+        return False
+    def execute(self, sql, params=()):
+        if sql.lstrip().startswith("SELECT setup_json"):
+            self.row = {"setup_json": self.store[params[0]], "updated_at": None} if params[0] in self.store else None
+        elif sql.lstrip().startswith("INSERT INTO user_fishing_gear"):
+            self.store[params[0]] = params[1]
+    def fetchone(self):
+        return self.row
+
+
+class FishingGearApiTests(unittest.TestCase):
+    def setUp(self):
+        self.client = TestClient(app)
+        self.store = {}
+        from app.fishing import gear
+        gear._schema_ready = False
+
+    def call(self, method, json=None, user={"id": 7}):
+        from app.routers import fishing as router
+        conn = FakeConn(self.store)
+        conn.cursor = lambda: GearCursor(self.store)
+        with patch.object(router, 'get_conn', return_value=conn), \
+             patch.object(router, '_get_token_user', side_effect=(lambda cur, auth: user) if user else HTTPException_401):
+            return self.client.request(method, '/api/users/me/fishing-gear', json=json, headers={'Authorization': 'Bearer t'})
+
+    def test_empty_until_saved_then_same_setup_everywhere(self):
+        self.assertEqual(self.call('GET').json(), {'items': [], 'hidden': [], 'updated_at': None})
+        body = {'items': [{'id': 'my-a1', 'name': ' 루어 박스 ', 'note': '스푼·지그'}, {'id': 'my-b2', 'name': '갯바위 방석'},
+                          {'id': 'my-c3', 'name': '루어 박스'}],  # 같은 이름은 하나만
+                'hidden': ['bait', 'bait', 'trash']}
+        saved = self.call('PUT', body)
+        self.assertEqual(saved.status_code, 200)
+        expected = {'items': [{'id': 'my-a1', 'name': '루어 박스', 'note': '스푼·지그'}, {'id': 'my-b2', 'name': '갯바위 방석', 'note': ''}],
+                    'hidden': ['bait', 'trash']}
+        self.assertEqual({k: saved.json()[k] for k in ('items', 'hidden')}, expected)
+        self.assertEqual(self.call('GET').json(), {**expected, 'updated_at': None})
+
+    def test_rejects_bad_input(self):
+        self.assertEqual(self.call('PUT', {'items': [{'id': 'my-a', 'name': '   '}]}).status_code, 400)
+        self.assertEqual(self.call('PUT', {'items': [{'id': 'my-a', 'name': '가' * 31}]}).status_code, 400)
+        self.assertEqual(self.call('PUT', {'items': [{'id': '<script>', 'name': '칼'}]}).status_code, 400)
+        self.assertEqual(self.call('PUT', {'items': [{'id': f'my-{i}', 'name': f'항목{i}'} for i in range(31)]}).status_code, 400)
+        self.assertEqual(self.call('PUT', {'hidden': ['Bad Id']}).status_code, 400)
+        self.assertEqual(self.store, {})
+
+    def test_requires_login(self):
+        self.assertEqual(self.call('GET', user=None).status_code, 401)
+        self.assertEqual(self.call('PUT', {'items': []}, user=None).status_code, 401)
+
+    def test_broken_stored_json_reads_as_empty(self):
+        self.store[7] = 'not json'
+        self.assertEqual(self.call('GET').json()['items'], [])
+
 def HTTPException_401(cur, auth):
     from fastapi import HTTPException
     raise HTTPException(status_code=401, detail="로그인이 필요합니다")
