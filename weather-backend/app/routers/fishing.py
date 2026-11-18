@@ -3,7 +3,7 @@ from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel
 
 from app.fishing import get_fishing_areas, get_fishing_summary
-from app.fishing.service import get_fishing_points, summary_for_point
+from app.fishing.service import get_fishing_points, get_point_index, summary_for_point
 from app.fishing.areas import get_area
 from app.fishing import favorites
 from app.core.auth import _get_token_user
@@ -27,6 +27,20 @@ def api_fishing_points():
         raise HTTPException(status_code=503, detail=str(exc))
     except Exception:
         raise HTTPException(status_code=502, detail="낚시 포인트 목록을 불러오지 못했습니다. 잠시 후 다시 시도해 주세요.")
+
+
+@router.get("/api/fishing/points/{point_id}/index")
+def api_fishing_point_index(point_id: str):
+    """포인트 하나의 바다낚시지수 자세히 (지수 설명 창용)."""
+    try:
+        result = get_point_index(point_id.strip())
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    except Exception:
+        raise HTTPException(status_code=502, detail="바다낚시지수를 불러오지 못했습니다. 잠시 후 다시 시도해 주세요.")
+    if result is None:
+        raise HTTPException(status_code=404, detail="지원하지 않는 낚시 포인트입니다.")
+    return result
 
 
 @router.get("/api/fishing/summary")

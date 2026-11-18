@@ -664,3 +664,22 @@ class TodayGradeTests(unittest.TestCase):
             points = {p['id']: p for p in service.get_fishing_points()}
         self.assertEqual((points['추자도']['today_grade'], points['추자도']['today_session']), ('매우좋음', '오전'))
         self.assertEqual(points['가거도']['today_grade'], '보통')
+
+
+@patch.dict(os.environ, {'KMA_API_HUB_KEY': 'k', 'KHOA_TIDEBED_API_KEY': 't', 'KHOA_FISHING_API_KEY': 'f'})
+class PointIndexApiTests(unittest.TestCase):
+    def setUp(self):
+        service.cache.clear()
+
+    def test_point_index_returns_only_that_point_without_other_agencies(self):
+        calls = []
+        client = TestClient(app)
+        with patch.object(providers, '_fetch', side_effect=fake_fetch(calls)):
+            response = client.get('/api/fishing/points/추자도/index')
+            missing = client.get('/api/fishing/points/없는곳/index')
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual((body['point']['name'], body['point']['distance_km'], body['point_id']), ('추자도', 0.0, '추자도'))
+        self.assertEqual([d['date'] for d in body['days']], ['2099-01-01', '2099-01-02'])
+        self.assertTrue(all('fcstFishing' in url for url in calls))  # 해상예보·조위 등은 부르지 않음
+        self.assertEqual(missing.status_code, 404)

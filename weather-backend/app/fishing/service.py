@@ -189,6 +189,16 @@ def get_point(point_id: str) -> dict | None:
     return next((point for point in get_fishing_points() if point["id"] == point_id), None)
 
 
+def get_point_index(point_id: str) -> dict | None:
+    """포인트 하나의 바다낚시지수(날짜·시간대·어종·해양 조건). 지수 설명 창용으로 가볍게 응답합니다."""
+    point = get_point(point_id)
+    if point is None:
+        return None
+    index = fishing_index.summarize(_load_index_items(), point["lat"], point["lon"])
+    return {"name": "국립해양조사원 바다낚시지수", "gubun": FISHING_INDEX_GUBUN, "point_id": point_id,
+            "today_grade": point.get("today_grade", ""), **index}
+
+
 def _load_warnings():
     rows, _ = cache.get_or_load(("warnings",), WARNING_TTL_SECONDS, lambda: parse_warnings(providers.fetch_warnings_text()))
     return rows
