@@ -9,15 +9,17 @@
   lat, lon    부이 거리 계산과 조위 예측에 쓰는 기준 좌표
   tide_system 물때 계산 방식: 7(서해안에서 주로 쓰는 7물때식) 또는 8(남해·동해안 8물때식)
   warning_regions 기상특보를 보여줄 특보구역 이름(일부만 써도 됨). 바다(앞바다·먼바다)와 가까운 육상 구역
+  point       이 해역에서 기본으로 보여줄 바다낚시지수 포인트 (포인트 목록은 zones.py)
 """
 
 FISHING_AREAS = [
-    {"id": "chuja", "place": "추자도 해상", "region": "12D00000", "region_name": "제주도 전해상", "lat": 33.96194, "lon": 126.44527, "tide_system": 8,
-     "warning_regions": ["제주도북부앞바다", "남해서부서쪽먼바다", "추자도"]},
+    # 12D00000은 '대화퇴'(동해) 구역이라 추자도가 속한 남해서부서쪽먼바다로 바로잡음 (2026-11-18 예보구역 목록 확인)
+    {"id": "chuja", "place": "추자도 해상", "region": "12B10201", "region_name": "남해서부서쪽먼바다", "lat": 33.96194, "lon": 126.44527, "tide_system": 8,
+     "warning_regions": ["남해서부서쪽먼바다", "추자도"], "point": "추자도"},
     {"id": "west", "place": "태안 앞바다", "region": "12A20100", "region_name": "서해중부앞바다", "lat": 36.7, "lon": 126.1, "tide_system": 7,
-     "warning_regions": ["충남북부앞바다", "서해중부안쪽먼바다", "태안"]},
+     "warning_regions": ["충남북부앞바다", "서해중부안쪽먼바다", "태안"], "point": "모항항"},
     {"id": "southeast", "place": "부산 앞바다", "region": "12B20100", "region_name": "남해동부앞바다", "lat": 35.1, "lon": 129.2, "tide_system": 8,
-     "warning_regions": ["부산", "남해동부안쪽먼바다"]},
+     "warning_regions": ["부산", "남해동부안쪽먼바다"], "point": "부산동부"},
 ]
 
 DEFAULT_AREA_ID = FISHING_AREAS[0]["id"]

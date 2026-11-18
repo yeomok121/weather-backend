@@ -14,6 +14,7 @@ import requests
 from app.fishing import providers
 from app.fishing.areas import FISHING_AREAS, REGION_NAMES, WARNING_REGIONS
 from app.fishing.warnings import parse_warnings, warnings_for_regions
+from app.fishing.zones import zone_for_point
 from app.fishing.cache import TTLCache
 from app.fishing import fishing_index
 from app.fishing.tides import find_extremes, normalize_predictions
@@ -27,6 +28,19 @@ FISHING_INDEX_GUBUN = "갯바위"
 WARNING_TTL_SECONDS = 5 * 60  # 특보는 수시로 바뀌므로 짧게 보관합니다.
 
 cache = TTLCache()
+
+
+def summary_for_point(point_id: str) -> dict | None:
+    """포인트 이름으로 요약: 위치는 포인트 좌표, 해상예보·특보는 연결된 바다 구역."""
+    point = get_point(point_id)
+    if point is None:
+        return None
+    zone = zone_for_point(point_id)
+    return get_fishing_summary(
+        place=point["name"], region=zone["forecast_reg"] if zone else None, lat=point["lat"], lon=point["lon"],
+        warning_regions=zone["warning_regions"] if zone else [], region_name=zone["forecast_name"] if zone else "",
+        point_id=point_id, tide_system=zone["tide_system"] if zone else 8,
+    )
 
 
 def get_fishing_areas() -> list[dict]:
@@ -52,8 +66,14 @@ def _resolve_region(region: str) -> tuple[str, str]:
 
 
 def _load_forecast(region: str, now: datetime) -> list[dict]:
-    rows, _ = cache.get_or_load(("forecast", region), FORECAST_TTL_SECONDS,
-                                lambda: providers.fetch_marine_forecast(region, now))
+    def load():
+        rows = providers.fetch_marine_forecast(region, now)
+        # 세부 구역 예보가 비어 있으면 상위 구역(예: 12B10201 → 12B10000)으로 한 번 더 찾습니다.
+        parent = region[:5] + "000"
+        if not rows and len(region) == 8 and parent != region:
+            rows = providers.fetch_marine_forecast(parent, now)
+        return rows
+    rows, _ = cache.get_or_load(("forecast", region), FORECAST_TTL_SECONDS, load)
     current_hour = now.strftime("%Y%m%d%H")
     return [dict(row) for row in rows if row.get("TM_EF", "") >= current_hour]
 
@@ -83,9 +103,33 @@ def _load_tide(lat: float, lon: float, date: str):
 
 
 def _load_fishing_index(lat: float, lon: float):
+    return fishing_index.summarize(_load_index_items(), lat, lon)
+
+
+def _load_index_items():
     items, _ = cache.get_or_load(("fishing_index", FISHING_INDEX_GUBUN), FISHING_INDEX_TTL_SECONDS,
                                  lambda: providers.fetch_fishing_index(FISHING_INDEX_GUBUN))
-    return fishing_index.summarize(items, lat, lon)
+    return items
+
+
+def get_fishing_points() -> list[dict]:
+    """바다낚시지수 포인트 목록 + 바다 구역 연결 (지도·목록에서 고르기용)."""
+    if not providers.fishing_index_key():
+        raise RuntimeError("바다낚시지수 API 설정이 아직 완료되지 않았습니다.")
+    points = []
+    for point in fishing_index.list_points(_load_index_items(), 0, 0):
+        zone = zone_for_point(point["name"])
+        points.append({
+            "id": point["name"], "name": point["name"], "lat": point["lat"], "lon": point["lon"],
+            "sea": zone["sea"] if zone else "", "zone": zone["zone"] if zone else "",
+            "region_name": zone["forecast_name"] if zone else "", "tide_system": zone["tide_system"] if zone else 8,
+        })
+    sea_order = {"서해": 0, "남해": 1, "제주": 2, "동해": 3}
+    return sorted(points, key=lambda item: (sea_order.get(item["sea"], 9), item["name"]))
+
+
+def get_point(point_id: str) -> dict | None:
+    return next((point for point in get_fishing_points() if point["id"] == point_id), None)
 
 
 def _load_warnings():
@@ -93,15 +137,23 @@ def _load_warnings():
     return rows
 
 
-def get_fishing_summary(place: str, region: str, lat: float = 33.96194, lon: float = 126.44527, area_id: str = "") -> dict:
+def get_fishing_summary(place: str, region: str | None, lat: float = 33.96194, lon: float = 126.44527, area_id: str = "",
+                        warning_regions: list[str] | None = None, region_name: str = "", point_id: str = "", tide_system: int | None = None) -> dict:
+    """region=None이면 해상예보 구역이 설정되지 않은 포인트라 해상예보를 건너뜁니다."""
     now = datetime.now(providers.SEOUL)
     if not providers.kma_key() or not providers.tidebed_key():
         raise RuntimeError("해양 예보 또는 조위 API 설정이 아직 완료되지 않았습니다.")
 
     errors = {}
-    region_name = REGION_NAMES.get(region, "")
+    region_name = region_name or REGION_NAMES.get(region or "", "")
+    if warning_regions is None:
+        warning_regions = WARNING_REGIONS.get(region or "", [])
 
     def forecast_task():
+        if region is None:
+            raise LookupError("no forecast zone")
+        if region_name:
+            return region, region_name, _load_forecast(region, now)
         resolved_region, resolved_name = _resolve_region(region)
         return resolved_region, resolved_name, _load_forecast(resolved_region, now)
 
@@ -118,6 +170,8 @@ def get_fishing_summary(place: str, region: str, lat: float = 33.96194, lon: flo
         forecast = []
         try:
             region, region_name, forecast = forecast_future.result()
+        except LookupError:
+            errors["forecast"] = "이 포인트는 해상예보 구역이 아직 설정되지 않았습니다."
         except (requests.RequestException, RuntimeError, KeyError):
             errors["forecast"] = "단기 해상예보를 가져오지 못했습니다. 예보 구역을 확인해 주세요."
 
@@ -151,15 +205,21 @@ def get_fishing_summary(place: str, region: str, lat: float = 33.96194, lon: flo
                 errors["fishing_index"] = "바다낚시지수를 가져오지 못했습니다."
 
         warning_rows = None
-        try:
-            warning_rows = warnings_future.result()
-        except (ValueError, requests.RequestException):
-            errors["warnings"] = "기상특보를 가져오지 못했습니다. 출조 전 기상청 특보를 직접 확인해 주세요."
+        if not warning_regions:
+            warnings_future.cancel()
+            errors["warnings"] = "이 포인트는 기상특보 구역이 아직 설정되지 않았습니다. 기상청 특보를 직접 확인해 주세요."
+        else:
+            try:
+                warning_rows = warnings_future.result()
+            except (ValueError, requests.RequestException):
+                errors["warnings"] = "기상특보를 가져오지 못했습니다. 출조 전 기상청 특보를 직접 확인해 주세요."
 
     predictions = normalize_predictions(tide, tide_tomorrow)
 
     return {
         "area_id": area_id,
+        "point_id": point_id,
+        "tide_system": tide_system,
         "place": place[:60],
         "region": region,
         "region_name": region_name,
@@ -178,9 +238,9 @@ def get_fishing_summary(place: str, region: str, lat: float = 33.96194, lon: flo
             "fishing_index": {"name": "국립해양조사원 바다낚시지수", "gubun": FISHING_INDEX_GUBUN, **index},
             "warnings": {
                 "name": "기상청 특보현황",
-                "regions": WARNING_REGIONS.get(region, []),
+                "regions": warning_regions,
                 # 자료를 못 받았으면 None (화면에서 '특보 없음'으로 잘못 보이지 않게)
-                "items": None if warning_rows is None else warnings_for_regions(warning_rows, WARNING_REGIONS.get(region, [])),
+                "items": None if warning_rows is None else warnings_for_regions(warning_rows, warning_regions),
             },
         },
         "errors": errors,

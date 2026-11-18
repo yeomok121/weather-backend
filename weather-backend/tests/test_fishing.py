@@ -5,15 +5,15 @@ from unittest.mock import Mock, patch
 import requests
 from fastapi.testclient import TestClient
 
-from app.fishing import fishing_index, providers, service, tides, warnings
+from app.fishing import fishing_index, providers, service, tides, warnings, zones
 from app.fishing.areas import FISHING_AREAS, get_area
 from app.fishing.cache import TTLCache
 from app.main import app
 
 FORECAST_TEXT = """# REG_ID, TM_FC, TM_EF, MOD, NE, STN, C, MAN_ID, MAN_FC, W1, T, W2, WS1, WS2, WH1, WH2, SKY, PREP, WF
-12D00000, 2099010105, 2099010112, A01, 1, 1, 1, 1, 1, N, 1, NE, 6, 9, 1.0, 1.5, DB01, 0, 맑음
-12D00000, 2099010105, 2099010200, A01, 1, 1, 1, 1, 1, N, 1, NE, 8, 12, 1.5, 2.5, DB03, 1, 비
-12D00000, 2099010017, 2099010112, A01, 1, 1, 1, 1, 1, N, 1, NE, 1, 2, 0.5, 0.5, DB01, 0, 이전발표
+12B10201, 2099010105, 2099010112, A01, 1, 1, 1, 1, 1, N, 1, NE, 6, 9, 1.0, 1.5, DB01, 0, 맑음
+12B10201, 2099010105, 2099010200, A01, 1, 1, 1, 1, 1, N, 1, NE, 8, 12, 1.5, 2.5, DB03, 1, 비
+12B10201, 2099010017, 2099010112, A01, 1, 1, 1, 1, 1, N, 1, NE, 1, 2, 0.5, 0.5, DB01, 0, 이전발표
 """
 BUOY_TEXT = """# TP, TM, STN_ID, STN_KO, LON, LAT, WH, WD, WS, WS_GST, TW, TA, PA, HM
 B, 209901011200, 22107, 먼부이, 129.0, 35.0, 1.2, 45, 5.0, 7.0, 18.0, 15.0, 1015, 70
@@ -91,7 +91,7 @@ class FishingSummaryTests(unittest.TestCase):
         service.cache.clear()
 
     def summary(self):
-        return service.get_fishing_summary('추자도 해상', '12D00000', 33.96194, 126.44527, area_id='chuja')
+        return service.get_fishing_summary('추자도 해상', '12B10201', 33.96194, 126.44527, area_id='chuja')
 
     def test_combines_latest_forecast_nearest_buoys_and_tide(self):
         calls = []
@@ -106,7 +106,7 @@ class FishingSummaryTests(unittest.TestCase):
         self.assertEqual(result['sources']['tide']['predictions'], [{'time': '2099-01-01T13:00+09:00', 'height_cm': 150.0, 'station': '추자도'}])
         self.assertEqual(result['sources']['tide']['station'], '추자도')
         self.assertEqual(result['errors'], {})
-        self.assertEqual(result['region_name'], '제주도 전해상')
+        self.assertEqual(result['region_name'], '남해서부서쪽먼바다')
         self.assertEqual(result['area_id'], 'chuja')
 
     def test_second_request_uses_cache_instead_of_calling_providers_again(self):
@@ -121,8 +121,8 @@ class FishingSummaryTests(unittest.TestCase):
 
     def test_cached_buoy_rows_are_not_mutated_between_areas(self):
         with patch.object(providers, '_fetch', side_effect=fake_fetch([])):
-            jeju = service.get_fishing_summary('a', '12D00000', 33.96, 126.44)
-            busan = service.get_fishing_summary('b', '12D00000', 35.1, 129.2)
+            jeju = service.get_fishing_summary('a', '12B10201', 33.96, 126.44)
+            busan = service.get_fishing_summary('b', '12B10201', 35.1, 129.2)
         self.assertEqual(jeju['sources']['buoy']['records'][0]['STN_KO'], '가까운부이')
         self.assertEqual(busan['sources']['buoy']['records'][0]['STN_KO'], '먼부이')
 
@@ -212,11 +212,11 @@ class FishingSummaryTests(unittest.TestCase):
             result = self.summary()  # 추자도 해상
         items = result['sources']['warnings']['items']
         self.assertEqual([(w['region'], w['title']) for w in items], [
-            ('남해서부서쪽먼바다', '풍랑주의보'), ('추자도', '강풍 예비특보'), ('제주도북부앞바다', '풍랑 예비특보')])
+            ('남해서부서쪽먼바다', '풍랑주의보'), ('추자도', '강풍 예비특보')])
         self.assertEqual(items[0]['release_hint'], '21일 오전(09시~12시)')
         self.assertEqual(items[0]['issued_at'], '2026-11-17T17:00+09:00')
         self.assertEqual(items[0]['effective'], '17일 19:00')
-        self.assertEqual(items[2]['effective'], '18일 오후(12시~18시)')  # 예비특보 약속 시각
+        self.assertEqual(items[1]['effective'], '18일 오후(12시~18시)')  # 예비특보 약속 시각
 
     def test_warning_api_not_subscribed_is_an_error(self):
         def fetch(url, params, timeout=15):
@@ -304,6 +304,96 @@ class TideTests(unittest.TestCase):
         self.assertEqual(tides.find_extremes(points), [])
 
 
+class ZoneTests(unittest.TestCase):
+    REAL_POINTS = ["가거도", "강릉항동(2km)", "거문도", "거제도", "거진항동측(2km)", "계마항", "공현진항동남동(5km)", "국화도", "김녕",
+                   "남애항", "대진항", "도두항북서(2km)", "모항항", "목포북항서측(53km)", "방포항", "부산남부", "부산동부", "부산서부",
+                   "비금도", "비양도", "상왕등도", "상태도", "서귀포", "서망항남측(27km)", "성산포", "신시도", "신지도", "아야진항",
+                   "안흥항북북서(27km)", "안흥항북측(30km)", "안흥항서측(40km)", "양포항남동(3km)", "어청도", "연도", "영흥도", "외옹치항",
+                   "욕지도", "울릉도", "울산", "울진 후정", "인천항서측(24km)", "임원항동북동(10km)", "척포항남남동(24km)",
+                   "척포항남남서(25km)", "추자도", "포항", "하리항남서(14km)", "하조도", "후포"]  # 2026-11-17 실제 49개
+
+    def test_every_real_point_has_a_zone(self):
+        self.assertEqual(len(self.REAL_POINTS), 49)
+        missing = [name for name in self.REAL_POINTS if zones.zone_for_point(name) is None]
+        self.assertEqual(missing, [])
+
+    def test_zone_details(self):
+        chuja = zones.zone_for_point("추자도")
+        self.assertEqual((chuja["forecast_reg"], chuja["sea"], chuja["tide_system"]), ("12B10201", "남해", 8))
+        self.assertEqual(chuja["warning_regions"], ["남해서부서쪽먼바다", "추자도"])
+        self.assertEqual(zones.zone_for_point("모항항")["tide_system"], 7)
+        self.assertIsNone(zones.zone_for_point("없는포인트"))
+
+    def test_warning_keywords_match_coastal_and_unseparated_names(self):
+        rows = warnings.parse_warnings(WARNING_TEXT + "S2330100, 남해서부서쪽먼바다중 추자도연안바다 , S2330100, 남해서부서쪽먼바다중 추자도연안바다, 202611171600, 202611181758, 풍랑  , 예비    , 발표,  ,=\n"
+                                       "S2211700, 인천경기남부앞바다중 평수구역 , S2211700, 인천경기남부앞바다중 남부앞평수구역, 202611171600, 202611181758, 풍랑  , 예비    , 발표,  ,=\n")
+        chuja = warnings.warnings_for_regions(rows, zones.zone_for_point("추자도")["warning_regions"])
+        self.assertIn("남해서부서쪽먼바다중 추자도연안바다", [w["region"] for w in chuja])
+        incheon = warnings.warnings_for_regions(rows, zones.zone_for_point("영흥도")["warning_regions"])
+        self.assertEqual([w["region"] for w in incheon], ["인천경기남부앞바다중 남부앞평수구역"])
+
+
+@patch.dict(os.environ, {'KMA_API_HUB_KEY': 'k', 'KHOA_TIDEBED_API_KEY': 't', 'KHOA_FISHING_API_KEY': 'f'})
+class PointSummaryTests(unittest.TestCase):
+    def setUp(self):
+        service.cache.clear()
+
+    def test_points_list_has_zone_and_sea(self):
+        with patch.object(providers, '_fetch', side_effect=fake_fetch([])):
+            points = service.get_fishing_points()
+        chuja = next(p for p in points if p['id'] == '추자도')
+        self.assertEqual((chuja['sea'], chuja['zone'], chuja['tide_system']), ('남해', '남해서부서쪽먼바다', 8))
+        self.assertEqual([p['sea'] for p in points], ['서해', '남해'])  # 서해 → 남해 → 제주 → 동해 순
+
+    def test_summary_for_point_uses_point_location_and_zone(self):
+        calls = []
+        def fetch(url, params, timeout=15):
+            calls.append((url, dict(params)))
+            return fake_fetch([])(url, params, timeout)
+        with patch.object(providers, '_fetch', side_effect=fetch):
+            result = service.summary_for_point('추자도')
+        self.assertEqual((result['point_id'], result['place'], result['tide_system']), ('추자도', '추자도', 8))
+        self.assertEqual(result['coordinates'], {'lat': 33.95, 'lon': 126.3})
+        self.assertEqual(result['sources']['fishing_index']['point']['distance_km'], 0.0)
+        self.assertEqual(next(p for u, p in calls if u.endswith('fct_afs_do.php'))['reg'], '12B10201')
+        self.assertEqual(result['region_name'], '남해서부서쪽먼바다')
+        self.assertIsNone(service.summary_for_point('없는포인트'))
+
+    def test_point_without_zone_skips_forecast_and_warnings_with_message(self):
+        with patch.object(providers, '_fetch', side_effect=fake_fetch([])):
+            result = service.summary_for_point('가거도')  # 테스트용 응답의 가거도는 연결이 있지만 구역을 지워 봄
+        self.assertNotIn('forecast', result['errors'])
+        with patch.dict(zones.POINT_ZONES, {'가거도': '없는구역'}), patch.object(providers, '_fetch', side_effect=fake_fetch([])):
+            service.cache.clear()
+            result = service.summary_for_point('가거도')
+        self.assertIn('해상예보 구역이 아직 설정되지 않았습니다', result['errors']['forecast'])
+        self.assertIn('기상특보 구역이 아직 설정되지 않았습니다', result['errors']['warnings'])
+        self.assertIsNone(result['sources']['warnings']['items'])
+
+    def test_forecast_falls_back_to_parent_zone_when_empty(self):
+        regs = []
+        def fetch(url, params, timeout=15):
+            if url.endswith('fct_afs_do.php'):
+                regs.append(params['reg'])
+                return text_response(FORECAST_TEXT if params['reg'] == '12B10000' else '#START7777\n#7777END\n')
+            return fake_fetch([])(url, params, timeout)
+        with patch.object(providers, '_fetch', side_effect=fetch):
+            result = service.summary_for_point('추자도')
+        self.assertEqual(regs, ['12B10201', '12B10000'])
+        self.assertEqual(len(result['sources']['forecast']['records']), 2)
+
+    def test_points_and_point_summary_api(self):
+        client = TestClient(app)
+        with patch.object(providers, '_fetch', side_effect=fake_fetch([])):
+            points = client.get('/api/fishing/points')
+            summary = client.get('/api/fishing/summary', params={'point': '추자도'})
+            missing = client.get('/api/fishing/summary', params={'point': '없는포인트'})
+        self.assertEqual(points.status_code, 200)
+        self.assertEqual(summary.status_code, 200)
+        self.assertEqual(summary.json()['point_id'], '추자도')
+        self.assertEqual(missing.status_code, 404)
+
+
 class TTLCacheTests(unittest.TestCase):
     def test_expires_after_ttl(self):
         now = [0.0]
@@ -351,3 +441,65 @@ class FishingApiTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class FakeCursor:
+    def __init__(self, store):
+        self.store, self.rows = store, []
+    def __enter__(self):
+        return self
+    def __exit__(self, *exc):
+        return False
+    def execute(self, sql, params=()):
+        if sql.lstrip().startswith("SELECT point_name"):
+            self.rows = [{"point_name": name} for name in self.store.get(params[0], [])]
+        elif sql.lstrip().startswith("DELETE FROM user_fishing_points"):
+            self.store[params[0]] = []
+    def executemany(self, sql, rows):
+        for user_id, name, _ in rows:
+            self.store.setdefault(user_id, []).append(name)
+    def fetchall(self):
+        return self.rows
+
+
+class FakeConn:
+    def __init__(self, store):
+        self.store, self.committed = store, False
+    def cursor(self):
+        return FakeCursor(self.store)
+    def commit(self):
+        self.committed = True
+    def close(self):
+        pass
+
+
+class FishingFavoritesApiTests(unittest.TestCase):
+    def setUp(self):
+        self.client = TestClient(app)
+        self.store = {}
+        from app.fishing import favorites
+        favorites._schema_ready = False
+
+    def call(self, method, json=None, user={"id": 7}):
+        from app.routers import fishing as router
+        with patch.object(router, 'get_conn', side_effect=lambda: FakeConn(self.store)), \
+             patch.object(router, '_get_token_user', side_effect=(lambda cur, auth: user) if user else HTTPException_401):
+            return self.client.request(method, '/api/users/me/fishing-points', json=json, headers={'Authorization': 'Bearer t'})
+
+    def test_save_and_read_keeps_order_and_removes_duplicates(self):
+        saved = self.call('PUT', {'points': ['추자도', ' 모항항 ', '추자도']})
+        self.assertEqual(saved.status_code, 200)
+        self.assertEqual(saved.json()['points'], ['추자도', '모항항'])
+        self.assertEqual(self.call('GET').json(), {'points': ['추자도', '모항항']})
+
+    def test_rejects_too_many_or_blank(self):
+        self.assertEqual(self.call('PUT', {'points': [f'p{i}' for i in range(11)]}).status_code, 400)
+        self.assertEqual(self.call('PUT', {'points': ['  ']}).status_code, 400)
+
+    def test_requires_login(self):
+        self.assertEqual(self.call('GET', user=None).status_code, 401)
+
+
+def HTTPException_401(cur, auth):
+    from fastapi import HTTPException
+    raise HTTPException(status_code=401, detail="로그인이 필요합니다")

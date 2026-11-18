@@ -6,7 +6,7 @@
 |---|---|---|
 | 날씨 | `app/routers/weather.py`, `app/weather.py`, `app/advice.py` | `/api/weather/*`, `/api/location/search` |
 | 산악 | `app/routers/mountain.py`, `app/routers/hiking.py`, `app/mountain_catalog.json` | `/api/mountain/*`, `/api/users/me/hiking-plans`, `/api/hiking/parties/*` |
-| 낚시 | `app/routers/fishing.py`, `app/fishing/` | `/api/fishing/areas`, `/api/fishing/summary` |
+| 낚시 | `app/routers/fishing.py`, `app/fishing/` | `/api/fishing/areas`, `/api/fishing/points`, `/api/fishing/summary`, `/api/users/me/fishing-points` |
 | 관리자 | `app/routers/admin.py`, `app/routers/notices.py` | `/api/admin/*`, `/api/notices` |
 
 ## 낚시 백엔드 (`app/fishing/`)
@@ -16,6 +16,8 @@
 | `areas.py` | 선택할 수 있는 해역 목록, 물때 방식(7·8물때식), 기상특보 구역. 해역 추가는 여기 한 줄만 추가하면 화면에도 나타납니다 |
 | `providers.py` | 기관 API 호출·응답 해석 (해상예보, 부이 관측, 조위, 바다낚시지수, 기상특보). 새 자료는 `fetch_*` 함수로 추가 |
 | `service.py` | 화면용 요약 만들기: 기관 API 동시 호출, 캐시, 기관별 오류 문구 |
+| `zones.py` | 낚시 포인트 49곳 → 바다 구역(해상예보 코드·특보구역 이름) 연결표. 새 포인트는 여기에 한 줄 추가 |
+| `favorites.py` | 계정별 즐겨찾는 포인트 저장 (최대 10곳, 테이블 자동 생성, `migrations/003`) |
 | `warnings.py` | 기상특보: 특보현황을 해역별 특보구역(`areas.py`의 `warning_regions`)으로 골라 심한 순으로 정리 |
 | `fishing_index.py` | 바다낚시지수: 해역에서 가장 가까운 포인트(80 km 안)를 골라 날짜·오전/오후·어종별로 정리 |
 | `tides.py` | 조위 예측(오늘·내일)을 시간순으로 정리하고 만조·간조 시각·높이 추정 |

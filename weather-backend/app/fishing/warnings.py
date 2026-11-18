@@ -70,7 +70,9 @@ def warnings_for_regions(rows: list[dict], keywords: list[str]) -> list[dict]:
     matched = []
     for row in rows:
         region = row.get("REG_KO", "")
-        if row.get("CMD") == "해제" or not any(keyword and keyword in region for keyword in keywords):
+        # '인천·경기남부앞바다'와 '인천경기남부앞바다중 평수구역'처럼 가운뎃점 유무가 달라도 같은 구역으로 봅니다.
+        plain = region.replace("·", "")
+        if row.get("CMD") == "해제" or not any(keyword and keyword.replace("·", "") in plain for keyword in keywords):
             continue
         matched.append({
             "region": region,
