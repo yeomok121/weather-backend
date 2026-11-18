@@ -1,9 +1,11 @@
 """관리자 페이지 API: 관리자 인증, 회원 관리, 감사 로그, 해양 API 점검."""
 import os
 import hmac
+import re
+from typing import Literal
 
-from fastapi import APIRouter, HTTPException, Header
-from pydantic import BaseModel
+from fastapi import APIRouter, HTTPException, Header, Query
+from pydantic import BaseModel, Field
 
 from app.database import get_conn
 from app.core.auth import (
@@ -211,5 +213,82 @@ def admin_audit(x_admin_password: str | None = Header(default=None), authorizati
             _ensure_admin_tables(cur)
             cur.execute('SELECT id, actor, action, target_username, created_at FROM admin_audit_log ORDER BY id DESC LIMIT 100')
             return cur.fetchall()
+    finally:
+        conn.close()
+
+class MountainSearchEvent(BaseModel):
+    term: str = Field(max_length=40)
+    outcome: Literal["course", "no_course", "not_found", "error"]
+
+
+def _prepare_search_events(cur):
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS mountain_search_events (
+            id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+            term VARCHAR(40) NOT NULL,
+            outcome VARCHAR(16) NOT NULL,
+            searched_at DATETIME NOT NULL,
+            INDEX ix_mountain_search_time (searched_at)
+        ) DEFAULT CHARSET=utf8mb4
+    """)
+    cur.execute("DELETE FROM mountain_search_events WHERE searched_at < UTC_TIMESTAMP() - INTERVAL 30 DAY")
+
+
+@router.post("/api/mountain/search-events", status_code=204)
+def record_mountain_search(event: MountainSearchEvent):
+    term = " ".join(event.term.split())
+    if not re.fullmatch(r"[가-힣 ]{2,24}", term):
+        return
+    # Only retain mountain-like names for unrecognized search input.
+    if event.outcome in ("not_found", "error") and not term.endswith(("산", "봉", "악", "오름")):
+        return
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            _prepare_search_events(cur)
+            cur.execute(
+                "INSERT INTO mountain_search_events (term, outcome, searched_at) VALUES (%s, %s, UTC_TIMESTAMP())",
+                (term, event.outcome),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+@router.get("/api/admin/mountain-searches")
+def list_mountain_searches(
+    days: int = Query(default=7),
+    outcome: Literal["all", "course", "no_course", "not_found", "error"] = "all",
+    x_admin_password: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+):
+    require_admin(x_admin_password, authorization, "system")
+    if days not in (7, 30):
+        raise HTTPException(status_code=422, detail="7일 또는 30일을 선택하세요.")
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            _prepare_search_events(cur)
+            window = "searched_at >= UTC_TIMESTAMP() - INTERVAL %s DAY"
+            cur.execute(f"SELECT outcome, COUNT(*) AS count FROM mountain_search_events WHERE {window} GROUP BY outcome", (days,))
+            totals = {row["outcome"]: row["count"] for row in cur.fetchall()}
+            rankings = {}
+            for status in ("not_found", "no_course"):
+                cur.execute(f"""
+                    SELECT term, COUNT(*) AS count FROM mountain_search_events
+                    WHERE {window} AND outcome = %s
+                    GROUP BY term ORDER BY count DESC, term LIMIT 10
+                """, (days, status))
+                rankings[status] = cur.fetchall()
+            condition = "" if outcome == "all" else " AND outcome = %s"
+            args = (days,) if outcome == "all" else (days, outcome)
+            cur.execute(f"""
+                SELECT id, term, outcome, CONCAT(DATE_FORMAT(searched_at, '%%Y-%%m-%%dT%%H:%%i:%%s'), 'Z') AS searched_at
+                FROM mountain_search_events WHERE {window}{condition}
+                ORDER BY searched_at DESC, id DESC LIMIT 100
+            """, args)
+            recent = cur.fetchall()
+        conn.commit()
+        return {"totals": totals, "rankings": rankings, "recent": recent}
     finally:
         conn.close()
