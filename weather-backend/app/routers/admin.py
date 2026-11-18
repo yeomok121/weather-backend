@@ -204,6 +204,86 @@ def admin_user_state(user_id: int, req: AdminUserState, x_admin_password: str | 
     finally:
         conn.close()
 
+@router.get("/api/admin/activity")
+def admin_activity(
+    days: int = Query(30, ge=1, le=90),
+    kind: Literal["all", "member", "notice"] = "all",
+    target: str = Query("", max_length=80),
+    x_admin_password: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+):
+    require_admin(x_admin_password, authorization, "system")
+    clauses = ["created_at >= CURRENT_TIMESTAMP - INTERVAL %s DAY"]
+    args = [days]
+    if kind != "all":
+        clauses.append("LEFT(action, 7) = 'notice_'" if kind == "notice" else "LEFT(action, 7) <> 'notice_'")
+    if target.strip():
+        clauses.append("LOCATE(%s, target_username) > 0")
+        args.append(target.strip())
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            _ensure_admin_tables(cur)
+            where = " AND ".join(clauses)
+            cur.execute(f"""
+                SELECT id, actor, action, target_username, created_at
+                FROM admin_audit_log WHERE {where} ORDER BY id DESC LIMIT 100
+            """, args)
+            return cur.fetchall()
+    finally:
+        conn.close()
+
+
+class MountainCandidate(BaseModel):
+    name: str = Field(min_length=2, max_length=24, pattern=r"^[가-힣 ]+$")
+    kind: Literal["new", "course"]
+    status: Literal["pending", "sourcing", "done"] = "pending"
+    note: str = Field(default="", max_length=500)
+
+
+def _prepare_candidates(cur):
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS mountain_admin_candidates (
+            name VARCHAR(24) NOT NULL, kind VARCHAR(10) NOT NULL,
+            status VARCHAR(10) NOT NULL, note VARCHAR(500) NOT NULL,
+            updated_at DATETIME NOT NULL, PRIMARY KEY (name, kind)
+        ) DEFAULT CHARSET=utf8mb4
+    """)
+
+
+@router.get("/api/admin/mountain-candidates")
+def list_candidates(x_admin_password: str | None = Header(default=None), authorization: str | None = Header(default=None)):
+    require_admin(x_admin_password, authorization, "system")
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            _prepare_candidates(cur)
+            cur.execute("SELECT name, kind, status, note FROM mountain_admin_candidates ORDER BY updated_at DESC, name, kind")
+            return cur.fetchall()
+    finally:
+        conn.close()
+
+
+@router.put("/api/admin/mountain-candidates")
+def save_candidate(req: MountainCandidate, x_admin_password: str | None = Header(default=None), authorization: str | None = Header(default=None)):
+    require_admin(x_admin_password, authorization, "system")
+    name = " ".join(req.name.split())
+    if len(name) < 2:
+        raise HTTPException(status_code=422, detail="산 이름을 확인해 주세요.")
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            _prepare_candidates(cur)
+            cur.execute("""
+                INSERT INTO mountain_admin_candidates VALUES (%s, %s, %s, %s, UTC_TIMESTAMP())
+                ON DUPLICATE KEY UPDATE status = VALUES(status), note = VALUES(note), updated_at = UTC_TIMESTAMP()
+            """, (name, req.kind, req.status, req.note.strip()))
+        conn.commit()
+    finally:
+        conn.close()
+    return {"ok": True}
+
+
 @router.get('/api/admin/audit')
 def admin_audit(x_admin_password: str | None = Header(default=None), authorization: str | None = Header(default=None)):
     require_admin(x_admin_password, authorization, 'members')
@@ -277,6 +357,7 @@ def record_mountain_search(event: MountainSearchEvent):
 def list_mountain_searches(
     service: Literal["mountain", "weather", "fishing"] = "mountain",
     days: int = Query(default=7),
+    term: str = Query("", max_length=40),
     outcome: Literal["all", "course", "no_course", "not_found", "error", "found"] = "all",
     x_admin_password: str | None = Header(default=None),
     authorization: str | None = Header(default=None),
@@ -300,8 +381,16 @@ def list_mountain_searches(
                     GROUP BY term ORDER BY count DESC, term LIMIT 10
                 """, (days, status))
                 rankings[status] = cur.fetchall()
+            cur.execute(f"""
+                SELECT DATE(searched_at + INTERVAL 9 HOUR) AS day, COUNT(*) AS count
+                FROM {table} WHERE {window} GROUP BY day ORDER BY day
+            """, (days,))
+            daily = cur.fetchall()
             condition = "" if outcome == "all" else " AND outcome = %s"
             args = (days,) if outcome == "all" else (days, outcome)
+            if term.strip():
+                condition += " AND LOCATE(%s, term) > 0"
+                args += (term.strip(),)
             cur.execute(f"""
                 SELECT id, term, outcome, CONCAT(DATE_FORMAT(searched_at, '%%Y-%%m-%%dT%%H:%%i:%%s'), 'Z') AS searched_at
                 FROM {table} WHERE {window}{condition}
@@ -309,6 +398,6 @@ def list_mountain_searches(
             """, args)
             recent = cur.fetchall()
         conn.commit()
-        return {"totals": totals, "rankings": rankings, "recent": recent}
+        return {"totals": totals, "rankings": rankings, "recent": recent, "daily": daily}
     finally:
         conn.close()
