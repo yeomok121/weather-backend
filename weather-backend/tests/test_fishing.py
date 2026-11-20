@@ -404,6 +404,55 @@ class TTLCacheTests(unittest.TestCase):
         now[0] = 11
         self.assertEqual(cache.get_or_load('k', 10, loader), (2, False))
 
+    def _run_together(self, cache, loader, count=5):
+        import threading
+        results, errors = [], []
+        def worker():
+            try:
+                results.append(cache.get_or_load('index', 60, loader))
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+        threads = [threading.Thread(target=worker) for _ in range(count)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(5)
+        return results, errors
+
+    def test_concurrent_requests_share_one_load(self):
+        """보관 시간이 끝난 직후 여러 요청이 동시에 와도 기관 API는 한 번만 부릅니다."""
+        import threading
+        import time as _time
+        calls = []
+        gate = threading.Event()
+        def slow_loader():
+            calls.append(1)
+            gate.wait(2)
+            return ['row']
+        cache = TTLCache()
+        timer = threading.Timer(0.3, gate.set)  # 모두 기다리는 중에 끝나게
+        timer.start()
+        results, errors = self._run_together(cache, slow_loader)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(errors, [])
+        self.assertEqual(sorted(r[1] for r in results), [False, True, True, True, True])
+        self.assertTrue(all(r[0] == ['row'] for r in results))
+
+    def test_concurrent_failure_is_shared_and_not_cached(self):
+        import threading
+        calls = []
+        gate = threading.Event()
+        def failing():
+            calls.append(1)
+            gate.wait(2)
+            raise RuntimeError('KHOA down')
+        cache = TTLCache()
+        threading.Timer(0.3, gate.set).start()
+        results, errors = self._run_together(cache, failing)
+        self.assertEqual(len(calls), 1)  # 기다리던 요청들이 줄줄이 다시 부르지 않음
+        self.assertEqual(len(errors), 5)
+        self.assertEqual(cache.get_or_load('index', 60, lambda: 'ok'), ('ok', False))  # 실패는 보관하지 않음
+
 
 @patch.dict(os.environ, {'KMA_API_HUB_KEY': 'k', 'KHOA_TIDEBED_API_KEY': 't', 'KHOA_FISHING_API_KEY': 'f'})
 class FishingApiTests(unittest.TestCase):
