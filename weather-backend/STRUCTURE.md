@@ -7,6 +7,7 @@
 | 날씨 | `app/routers/weather.py`, `app/weather.py`, `app/advice.py` | `/api/weather/*`, `/api/location/search` |
 | 산악 | `app/routers/mountain.py`, `app/routers/hiking.py`, `app/mountain_catalog.json` | `/api/mountain/*`, `/api/users/me/hiking-plans`, `/api/hiking/parties/*` |
 | 낚시 | `app/routers/fishing.py`, `app/fishing/` | `/api/fishing/areas`, `/api/fishing/points`, `/api/fishing/summary`, `/api/users/me/fishing-points`, `/api/users/me/fishing-gear` |
+| 낚시 커뮤니티 | `app/routers/community.py`, `app/community/` | `/api/community/posts`, `/api/community/photos/{id}`, `/api/admin/community/reports` |
 | 관리자 | `app/routers/admin.py`, `app/routers/notices.py` | `/api/admin/*`, `/api/notices` |
 
 ## 낚시 백엔드 (`app/fishing/`)

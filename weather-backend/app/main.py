@@ -17,7 +17,7 @@ from pymysql import err as db_errors
 
 from app.health import router as health_router, monitor_database
 from app.weather_diagnostics import RequestLogMiddleware, log_environment_status, log_error, request_id_var
-from app.routers import admin, auth, fishing, hiking, mountain, notices, radar, weather, wind
+from app.routers import admin, auth, community, fishing, hiking, mountain, notices, radar, weather, wind
 
 load_dotenv()
 
@@ -76,6 +76,7 @@ app.include_router(radar.router)
 app.include_router(wind.router)
 app.include_router(mountain.router)
 app.include_router(fishing.router)
+app.include_router(community.router)
 app.include_router(auth.router)
 app.include_router(hiking.router)
 app.include_router(admin.router)
