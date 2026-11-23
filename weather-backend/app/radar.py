@@ -29,6 +29,8 @@ LEGEND = [
     {"value": 40, "color": "#f48b32"},
     {"value": 50, "color": "#d94357"},
 ]
+# Alpha values encode the observed class in the original (unblended) PNG.
+PIXEL_ALPHA = {"missing": [48, 96], "clear": 0, "echo": [80, 115, 155, 195, 205, 215]}
 _lock = threading.Lock()
 _frames = OrderedDict()
 _failures = OrderedDict()
@@ -143,12 +145,16 @@ def render_grid(grid, valid, pixels):
     raster = np.zeros(SIZE * SIZE, dtype=np.uint8)
     np.maximum.at(raster, pixels, levels)
     palette = np.array([
-        [110, 122, 140, 48], [0, 0, 0, 0],
-        [85, 185, 243, 80], [33, 199, 203, 115], [55, 191, 100, 155],
-        [234, 203, 50, 195], [244, 139, 50, 205], [217, 67, 87, 215],
+        [110, 122, 140, PIXEL_ALPHA["missing"][0]], [0, 0, 0, PIXEL_ALPHA["clear"]],
+        *[list(bytes.fromhex(item["color"][1:])) + [alpha]
+          for item, alpha in zip(LEGEND, PIXEL_ALPHA["echo"])],
     ], dtype=np.uint8)
+    cells = raster.reshape(SIZE, SIZE)
+    rgba = palette[cells]
+    row, col = np.ogrid[:SIZE, :SIZE]
+    rgba[(cells == 0) & ((row + col) % 10 < 2), 3] = PIXEL_ALPHA["missing"][1]
     output = io.BytesIO()
-    Image.fromarray(palette[raster.reshape(SIZE, SIZE)]).save(output, format="PNG")
+    Image.fromarray(rgba).save(output, format="PNG")
     return output.getvalue()
 
 
@@ -203,9 +209,10 @@ def manifest():
         times = [latest - timedelta(minutes=minutes) for minutes in range(60, -1, -10)]
         _manifest = {
             "source": "기상청 HSR 합성 관측", "bounds": BOUNDS, "legend": LEGEND,
+            "pixel_alpha": PIXEL_ALPHA,
             "latest_at": latest.isoformat(), "generated_at": now.isoformat(),
             "frames": [{"id": value.strftime("%Y%m%d%H%M"), "observed_at": value.isoformat(),
-                        "path": f"/api/weather/radar/frames/{value:%Y%m%d%H%M}.png?render=2"} for value in times],
+                        "path": f"/api/weather/radar/frames/{value:%Y%m%d%H%M}.png?render=3"} for value in times],
         }
         _manifest_until = time.monotonic() + 120
         return _manifest
