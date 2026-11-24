@@ -63,3 +63,17 @@ def replace_points(cur, user_id: int, names: list[str]) -> None:
             "INSERT INTO user_fishing_points (user_id, point_name, sort_order) VALUES (%s, %s, %s)",
             [(user_id, name, index) for index, name in enumerate(names)],
         )
+
+
+def apply_point_changes(cur, user_id, additions, removals):
+    ensure_table(cur)
+    cur.execute("SELECT id FROM users WHERE id = %s FOR UPDATE", (user_id,))
+    cur.execute("SELECT point_name FROM user_fishing_points WHERE user_id = %s ORDER BY sort_order FOR UPDATE", (user_id,))
+    current = [row["point_name"] for row in cur.fetchall()]
+    removed = set(removals)
+    names = [name for name in current if name not in removed]
+    names.extend(name for name in additions if name not in names and name not in removed)
+    names = names[:MAX_POINTS]
+    if names != current:
+        replace_points(cur, user_id, names)
+    return names

@@ -1,5 +1,6 @@
 """산악 페이지 API: 산행 계획 저장, 산행 파티(초대·일정·공동 준비물)."""
 import json
+from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Header
 from pydantic import BaseModel, Field
@@ -47,6 +48,16 @@ class HikingPartyInviteResponse(BaseModel):
 class HikingPartyItemRequest(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     quantity: int = Field(default=1, ge=1, le=99)
+    kind: Literal["personal", "shared"] = "shared"
+    unit: str = Field(default="", max_length=12)
+
+
+class GearAllocationRequest(BaseModel):
+    quantity: int = Field(ge=0, le=99)
+
+
+class GearCheckRequest(BaseModel):
+    is_packed: bool
 
 class HikingPartyItemUpdate(BaseModel):
     quantity: int | None = Field(default=None, ge=1, le=99)
@@ -96,25 +107,66 @@ def _party_member_role(cur, party_id: int, user_id: int):
 
 def _get_party_items(cur, party_id: int):
     cur.execute("""
-        SELECT i.id, i.name, i.quantity, i.is_packed,
+        SELECT i.id, i.name, i.quantity, i.is_packed, i.assigned_to_user_id,
                u.username AS assigned_to_username, u.name AS assigned_to_name,
-               creator.username AS created_by_username
+               creator.username AS created_by_username,
+               COALESCE(mode.kind, 'shared') AS kind, COALESCE(mode.unit, '') AS unit
         FROM hiking_party_items i
+        LEFT JOIN hiking_party_item_modes mode ON mode.item_id = i.id
         LEFT JOIN users u ON u.id = i.assigned_to_user_id
         JOIN users creator ON creator.id = i.created_by_user_id
         WHERE i.party_id = %s
         ORDER BY i.id
     """, (party_id,))
-    return [
-        {
-            "id": row["id"], "name": row["name"], "quantity": int(row["quantity"]),
-            "is_packed": bool(row["is_packed"]),
-            "assigned_to_username": row["assigned_to_username"],
-            "assigned_to_name": row["assigned_to_name"],
-            "created_by_username": row["created_by_username"],
-        }
-        for row in cur.fetchall()
-    ]
+    items = cur.fetchall()
+    cur.execute("""
+        SELECT a.item_id, u.username, u.name, a.quantity, a.is_packed
+        FROM hiking_party_item_members a JOIN users u ON u.id = a.user_id
+        WHERE a.party_id = %s ORDER BY u.username
+    """, (party_id,))
+    allocations = {}
+    for row in cur.fetchall():
+        allocations.setdefault(row["item_id"], []).append({
+            "username": row["username"], "name": row["name"],
+            "quantity": row["quantity"], "is_packed": bool(row["is_packed"]),
+        })
+    for item in items:
+        rows = allocations.get(item["id"], [])
+        if item.pop("assigned_to_user_id") is not None and not rows:
+            rows = [{"username": item["assigned_to_username"], "name": item["assigned_to_name"],
+                     "quantity": item["quantity"], "is_packed": bool(item["is_packed"])}]
+        item["member_items"] = rows
+        item["is_packed"] = bool(item["is_packed"])
+    return items
+
+
+def _lock_gear_item(cur, party_id, item_id, user_id):
+    cur.execute("SELECT id FROM hiking_parties WHERE id = %s FOR UPDATE", (party_id,))
+    if not cur.fetchone():
+        raise HTTPException(status_code=404, detail="파티를 찾을 수 없습니다")
+    role = _party_member_role(cur, party_id, user_id)
+    cur.execute("""
+        SELECT i.*, mode.kind FROM hiking_party_items i
+        LEFT JOIN hiking_party_item_modes mode ON mode.item_id = i.id
+        WHERE i.id = %s AND i.party_id = %s FOR UPDATE
+    """, (item_id, party_id))
+    item = cur.fetchone()
+    if not item:
+        raise HTTPException(status_code=404, detail="준비물을 찾을 수 없습니다")
+    return role, item
+
+
+def _adopt_legacy_allocation(cur, item):
+    if item["kind"] is not None:
+        return
+    cur.execute("INSERT INTO hiking_party_item_modes (item_id, kind) VALUES (%s, 'shared')", (item["id"],))
+    if item["assigned_to_user_id"] is not None:
+        cur.execute("""
+            INSERT INTO hiking_party_item_members (item_id, party_id, user_id, quantity, is_packed)
+            SELECT %s, party_id, user_id, %s, %s FROM hiking_party_members WHERE party_id=%s AND user_id=%s
+        """, (item["id"], item["quantity"], item["is_packed"], item["party_id"], item["assigned_to_user_id"]))
+    cur.execute("UPDATE hiking_party_items SET assigned_to_user_id=NULL, is_packed=0 WHERE id=%s", (item["id"],))
+
 
 @router.get("/api/users/me/hiking-plans")
 def list_my_hiking_plans(authorization: str | None = Header(default=None)):
@@ -471,6 +523,9 @@ def add_hiking_party_item(party_id: int, req: HikingPartyItemRequest, authorizat
         with conn.cursor() as cur:
             user = _get_token_user(cur, authorization)
             _ensure_hiking_tables(cur)
+            cur.execute("SELECT id FROM hiking_parties WHERE id=%s FOR UPDATE", (party_id,))
+            if not cur.fetchone():
+                raise HTTPException(status_code=404, detail="파티를 찾을 수 없습니다")
             _party_member_role(cur, party_id, user["id"])
             cur.execute("SELECT COUNT(*) AS count FROM hiking_party_items WHERE party_id = %s", (party_id,))
             if cur.fetchone()["count"] >= 100:
@@ -478,6 +533,9 @@ def add_hiking_party_item(party_id: int, req: HikingPartyItemRequest, authorizat
             cur.execute("INSERT INTO hiking_party_items (party_id, name, quantity, created_by_user_id) VALUES (%s, %s, %s, %s)",
                         (party_id, req.name.strip(), req.quantity, user["id"]))
             item_id = cur.lastrowid
+            if {"kind", "unit"} & req.model_fields_set:
+                cur.execute("INSERT INTO hiking_party_item_modes (item_id,kind,unit) VALUES (%s,%s,%s)",
+                            (item_id, req.kind, req.unit.strip()))
         conn.commit()
         return {"id": item_id, "message": "준비물을 추가했습니다"}
     finally:
@@ -493,10 +551,20 @@ def update_hiking_party_item(party_id: int, item_id: int, req: HikingPartyItemUp
         with conn.cursor() as cur:
             user = _get_token_user(cur, authorization)
             _ensure_hiking_tables(cur)
-            _party_member_role(cur, party_id, user["id"])
-            cur.execute("SELECT id FROM hiking_party_items WHERE id = %s AND party_id = %s", (item_id, party_id))
-            if not cur.fetchone():
-                raise HTTPException(status_code=404, detail="공동 준비물을 찾을 수 없습니다")
+            role, item = _lock_gear_item(cur, party_id, item_id, user["id"])
+            if item["kind"] is not None:
+                if fields != {"quantity"} or req.quantity is None:
+                    raise HTTPException(status_code=400, detail="담당과 완료 상태는 준비물 목록에서 변경해 주세요")
+                if role != "owner" and item["created_by_user_id"] != user["id"]:
+                    raise HTTPException(status_code=403, detail="파티장이나 등록한 회원만 수량을 수정할 수 있습니다")
+                cur.execute("SELECT COALESCE(SUM(quantity),0) AS total FROM hiking_party_item_members WHERE item_id=%s FOR UPDATE", (item_id,))
+                if item["kind"] == "shared" and cur.fetchone()["total"] > req.quantity:
+                    raise HTTPException(status_code=409, detail="먼저 배정 수량을 줄여 주세요")
+                cur.execute("UPDATE hiking_party_items SET quantity=%s WHERE id=%s", (req.quantity, item_id))
+                if item["kind"] == "personal" and req.quantity != item["quantity"]:
+                    cur.execute("DELETE FROM hiking_party_item_members WHERE item_id=%s", (item_id,))
+                conn.commit()
+                return {"message": "준비물 수량을 업데이트했습니다"}
             updates = []
             values = []
             if "quantity" in fields and req.quantity is not None:
@@ -526,6 +594,68 @@ def update_hiking_party_item(party_id: int, item_id: int, req: HikingPartyItemUp
         return {"message": "공동 준비물을 업데이트했습니다"}
     finally:
         conn.close()
+
+@router.put("/api/hiking/parties/{party_id}/items/{item_id}/allocations/{username}")
+def allocate_party_gear(party_id: int, item_id: int, username: str, req: GearAllocationRequest, authorization: str | None = Header(default=None)):
+    with get_conn() as conn, conn.cursor() as cur:
+        user = _get_token_user(cur, authorization)
+        _ensure_hiking_tables(cur)
+        role, item = _lock_gear_item(cur, party_id, item_id, user["id"])
+        if item["kind"] == "personal":
+            raise HTTPException(status_code=400, detail="각자 챙기는 물품에는 담당자를 배정하지 않습니다")
+        cur.execute("""
+            SELECT u.id FROM users u JOIN hiking_party_members m ON m.user_id = u.id
+            WHERE m.party_id = %s AND u.username = %s FOR UPDATE
+        """, (party_id, username))
+        target = cur.fetchone()
+        if not target:
+            raise HTTPException(status_code=400, detail="현재 파티 구성원만 담당할 수 있습니다")
+        if target["id"] != user["id"] and role != "owner" and item["created_by_user_id"] != user["id"]:
+            raise HTTPException(status_code=403, detail="내 담당 수량만 변경할 수 있습니다")
+        _adopt_legacy_allocation(cur, item)
+        cur.execute("""
+            SELECT COALESCE(SUM(quantity),0) AS total FROM hiking_party_item_members
+            WHERE item_id=%s AND user_id<>%s FOR UPDATE
+        """, (item_id, target["id"]))
+        if cur.fetchone()["total"] + req.quantity > item["quantity"]:
+            raise HTTPException(status_code=409, detail="배정 수량이 파티 전체 수량보다 많습니다")
+        key = (item_id, target["id"])
+        if req.quantity == 0:
+            cur.execute("DELETE FROM hiking_party_item_members WHERE item_id=%s AND user_id=%s", key)
+        else:
+            cur.execute("""
+                INSERT INTO hiking_party_item_members (item_id,user_id,party_id,quantity) VALUES (%s,%s,%s,%s)
+                ON DUPLICATE KEY UPDATE is_packed=IF(quantity=%s,is_packed,0), quantity=%s
+            """, (*key, party_id, req.quantity, req.quantity, req.quantity))
+        conn.commit()
+    return {"message": "담당 수량을 저장했습니다"}
+
+
+@router.put("/api/hiking/parties/{party_id}/items/{item_id}/my-check")
+def check_my_party_gear(party_id: int, item_id: int, req: GearCheckRequest, authorization: str | None = Header(default=None)):
+    with get_conn() as conn, conn.cursor() as cur:
+        user = _get_token_user(cur, authorization)
+        _ensure_hiking_tables(cur)
+        _, item = _lock_gear_item(cur, party_id, item_id, user["id"])
+        key = (item_id, user["id"])
+        if item["kind"] == "personal":
+            if req.is_packed:
+                cur.execute("""
+                    INSERT INTO hiking_party_item_members (item_id,user_id,party_id,quantity,is_packed) VALUES (%s,%s,%s,1,1)
+                    ON DUPLICATE KEY UPDATE is_packed=1
+                """, (*key, party_id))
+            else:
+                cur.execute("DELETE FROM hiking_party_item_members WHERE item_id=%s AND user_id=%s", key)
+        else:
+            _adopt_legacy_allocation(cur, item)
+            cur.execute("SELECT 1 FROM hiking_party_item_members WHERE item_id=%s AND user_id=%s FOR UPDATE", key)
+            if not cur.fetchone():
+                raise HTTPException(status_code=403, detail="내게 배정된 준비물만 체크할 수 있습니다")
+            cur.execute("UPDATE hiking_party_item_members SET is_packed=%s WHERE item_id=%s AND user_id=%s",
+                        (int(req.is_packed), *key))
+        conn.commit()
+    return {"message": "준비 상태를 저장했습니다"}
+
 
 @router.delete("/api/hiking/parties/{party_id}/items/{item_id}")
 def delete_hiking_party_item(party_id: int, item_id: int, authorization: str | None = Header(default=None)):

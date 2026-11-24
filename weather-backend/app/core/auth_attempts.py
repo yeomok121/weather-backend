@@ -36,14 +36,14 @@ def _reject(seconds):
 
 
 @contextmanager
-def credential_attempt(request: Request, username: str):
+def credential_attempt(request: Request, username: str, *, scope="credentials", count_request=False):
     global _next_cleanup
     identity = unicodedata.normalize("NFKD", username.strip().casefold())
     identity = "".join(char for char in identity if not unicodedata.combining(char))
-    account = sha256(identity.encode()).digest()
+    account = sha256(identity.encode(errors="replace")).digest()
     # Only use the peer address resolved by the server's trusted proxy setup.
     peer = request.client.host if request.client else "unknown"
-    limits = [(("account", account), 5, 2), (("ip", peer), 30, 4)]
+    limits = [((scope, "account", account), 5, 2), ((scope, "ip", peer), 30, 4)]
 
     with _lock:
         now = monotonic()
@@ -69,11 +69,11 @@ def credential_attempt(request: Request, username: str):
         for bucket, _ in buckets:
             bucket.active += 1
 
-    failed = False
+    failed = count_request
     try:
         yield
     except HTTPException as error:
-        failed = error.status_code == 401
+        failed = count_request or error.status_code == 401
         raise
     finally:
         with _lock:

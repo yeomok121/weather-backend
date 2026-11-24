@@ -10,9 +10,9 @@ from app.core.auth_attempts import credential_attempt
 from app.core.auth import (
     AUTH_TOKEN_TTL_SECONDS, SignUpRequest, LoginRequest,
     _validate_new_username, validate_new_password, _lock_username_changes,
-    _auth_signing_key, _create_access_token, _get_token_user, _hash_pw, _verify_user,
+    _auth_signing_key, create_member_session, revoke_member_session, _store_password_change, _get_token_user, _hash_pw, _verify_user,
 )
-from app.core.schema import _ensure_admin_tables, _ensure_user_favorites_table, _ensure_hiking_tables
+from app.core.schema import _ensure_admin_tables, _ensure_user_favorites_table, _ensure_hiking_tables, ensure_member_sessions
 
 router = APIRouter()
 
@@ -77,21 +77,38 @@ def login(req: LoginRequest, request: Request):
                 _ensure_admin_tables(cur)
                 cur.execute("SELECT u.*, COALESCE(m.suspended, 0) AS suspended, COALESCE(m.token_version, 0) AS token_version FROM users u LEFT JOIN admin_user_metadata m ON m.user_id = u.id WHERE u.username = %s", (req.username,))
                 user = cur.fetchone()
+                password = req.password.encode("utf-8")
+                if not user or len(password) > 72 or not bcrypt.checkpw(password, user["password_hash"].encode("utf-8")):
+                    raise HTTPException(status_code=401, detail="아이디 또는 비밀번호가 올바르지 않습니다")
+                if user['suspended']:
+                    raise HTTPException(status_code=403, detail="이용이 정지된 계정입니다. 관리자에게 문의해주세요")
+                ensure_member_sessions(cur)
+                token = create_member_session(cur, user["id"], user["token_version"])
+            conn.commit()
         finally:
             conn.close()
-
-        if not user or len(req.password.encode("utf-8")) > 72 or not bcrypt.checkpw(req.password.encode("utf-8"), user["password_hash"].encode("utf-8")):
-            raise HTTPException(status_code=401, detail="아이디 또는 비밀번호가 올바르지 않습니다")
-    if user['suspended']:
-        raise HTTPException(status_code=403, detail="이용이 정지된 계정입니다. 관리자에게 문의해주세요")
     return {
         "message": "로그인 성공",
         "name": user["name"],
         "username": user["username"],
-        "access_token": _create_access_token(user["username"], user['token_version']),
+        "user_id": user["id"],
+        "access_token": token,
         "token_type": "bearer",
         "expires_in": AUTH_TOKEN_TTL_SECONDS,
     }
+
+
+@router.post("/api/logout")
+def logout(authorization: str | None = Header(default=None)):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            revoke_member_session(cur, authorization)
+        conn.commit()
+    finally:
+        conn.close()
+    return {"message": "로그아웃되었습니다"}
+
 
 class FavoriteLocation(BaseModel):
     name: str
@@ -168,19 +185,6 @@ class UpdateUserRequest(BaseModel):
 class DeleteUserRequest(BaseModel):
     username: str
     password: str
-
-def _store_password_change(cur, user, new_password, name=None):
-    new_hash = _hash_pw(new_password)
-    if name is None:
-        cur.execute("UPDATE users SET password_hash = %s WHERE id = %s AND BINARY password_hash = %s",
-                    (new_hash, user["id"], user["password_hash"]))
-    else:
-        cur.execute("UPDATE users SET name = %s, password_hash = %s WHERE id = %s AND BINARY password_hash = %s",
-                    (name, new_hash, user["id"], user["password_hash"]))
-    if cur.rowcount != 1:
-        raise HTTPException(status_code=409, detail="비밀번호가 이미 변경되었습니다. 현재 비밀번호를 다시 확인해 주세요")
-    cur.execute("INSERT INTO admin_user_metadata (user_id, token_version) VALUES (%s,1) ON DUPLICATE KEY UPDATE token_version=token_version+1", (user["id"],))
-
 
 @router.put("/api/users/update")
 def update_user(req: UpdateUserRequest, request: Request):

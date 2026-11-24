@@ -3,6 +3,9 @@
 읽기는 누구나, 쓰기·공감·신고는 로그인한 회원. 공지는 최고 관리자·공지 관리자만.
 글 입력 검사·사진 처리는 app/community/rules.py, 저장은 app/community/store.py
 """
+from hashlib import sha256
+from uuid import UUID
+
 from fastapi import APIRouter, Header, HTTPException, Query, Response
 from pydantic import BaseModel, Field
 
@@ -70,10 +73,13 @@ def get_community_post(post_id: int, authorization: str | None = Header(default=
 
 
 @router.post("/api/community/posts", status_code=201)
-def create_community_post(req: PostRequest, authorization: str | None = Header(default=None)):
+def create_community_post(req: PostRequest, authorization: str | None = Header(default=None),
+                          idempotency_key: UUID | None = Header(default=None)):
+    fingerprint = sha256(req.model_dump_json().encode()).digest() if idempotency_key else None
     conn = get_conn()
     try:
         with conn.cursor() as cur:
+            store.ensure_tables(cur)
             user = _get_token_user(cur, authorization)
             try:
                 post = rules.clean_post(req.model_dump(), user["role"])
@@ -81,7 +87,21 @@ def create_community_post(req: PostRequest, authorization: str | None = Header(d
                 raise HTTPException(status_code=403, detail=str(exc))
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail=str(exc))
-            store.ensure_tables(cur)
+            if idempotency_key:
+                cur.execute("SELECT id FROM users WHERE id=%s FOR UPDATE", (user["id"],))
+                cur.execute("""
+                    SELECT payload_digest, post_id FROM community_post_submissions
+                    WHERE user_id=%s AND submission_key=%s FOR UPDATE
+                """, (user["id"], idempotency_key.bytes))
+                previous = cur.fetchone()
+                if previous:
+                    if previous["payload_digest"] != fingerprint or not previous["post_id"]:
+                        raise HTTPException(status_code=409, detail="이미 처리된 제출입니다. 글 목록을 확인해 주세요")
+                    conn.commit()
+                    created, _ = store.get_post(cur, previous["post_id"], user)
+                    if not created:
+                        raise HTTPException(status_code=409, detail="이미 처리된 제출입니다. 글 목록을 확인해 주세요")
+                    return created
             if post["category"] != "공지" and store.count_recent_posts(cur, user["id"]) >= rules.DAILY_POST_LIMIT:
                 raise HTTPException(status_code=429, detail=f"글은 하루에 {rules.DAILY_POST_LIMIT}개까지 쓸 수 있어요.")
             try:  # 사진 처리는 무거우니 한도 확인 뒤에
@@ -89,6 +109,11 @@ def create_community_post(req: PostRequest, authorization: str | None = Header(d
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail=str(exc))
             post_id = store.create_post(cur, user["id"], post, photos)
+            if idempotency_key:
+                cur.execute("""
+                    INSERT INTO community_post_submissions (user_id, submission_key, payload_digest, post_id)
+                    VALUES (%s,%s,%s,%s)
+                """, (user["id"], idempotency_key.bytes, fingerprint, post_id))
             created, _ = store.get_post(cur, post_id, user)
         conn.commit()
     finally:

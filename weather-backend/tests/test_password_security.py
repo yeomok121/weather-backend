@@ -71,7 +71,7 @@ class PasswordSecurityTests(unittest.TestCase):
             patch.object(auth_attempts, "_buckets", {}),
             patch.object(auth, "get_conn", return_value=connection),
             patch.object(auth, "_verify_user", return_value={"id": 1, "password_hash": "old-hash"}),
-            patch.object(auth, "_hash_pw", return_value="new-hash"),
+            patch("app.core.auth._hash_pw", return_value="new-hash"),
         ):
             response = client.post("/api/password/reset", json={
                 "username": "demo1", "current_password": "old", "new_password": "Cloudy trails near dawn",

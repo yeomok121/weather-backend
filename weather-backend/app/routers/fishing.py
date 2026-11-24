@@ -1,6 +1,6 @@
 """낚시 페이지 API: 해역·포인트 목록, 바다 낚시 정보 요약, 즐겨찾는 포인트."""
 from fastapi import APIRouter, Header, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.fishing import get_fishing_areas, get_fishing_summary
 from app.fishing.service import get_fishing_points, get_point_index, summary_for_point
@@ -83,6 +83,7 @@ def get_my_fishing_points(authorization: str | None = Header(default=None)):
     conn = get_conn()
     try:
         with conn.cursor() as cur:
+            favorites.ensure_table(cur)
             user = _get_token_user(cur, authorization)
             return {"points": favorites.get_points(cur, user["id"])}
     finally:
@@ -98,12 +99,33 @@ def replace_my_fishing_points(req: FishingPointsRequest, authorization: str | No
     conn = get_conn()
     try:
         with conn.cursor() as cur:
+            favorites.ensure_table(cur)
             user = _get_token_user(cur, authorization)
             favorites.replace_points(cur, user["id"], names)
         conn.commit()
     finally:
         conn.close()
     return {"message": "즐겨찾는 낚시 포인트를 계정에 저장했습니다", "points": names}
+
+
+class FishingPointChanges(BaseModel):
+    add: list[str] = Field(default_factory=list, max_length=20)
+    remove: list[str] = Field(default_factory=list, max_length=10)
+
+
+@router.patch("/api/users/me/fishing-points")
+def change_my_fishing_points(req: FishingPointChanges, authorization: str | None = Header(default=None)):
+    try:
+        additions = [favorites.clean_names([name])[0] for name in req.add]
+        removals = favorites.clean_names(req.remove)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    with get_conn() as conn, conn.cursor() as cur:
+        favorites.ensure_table(cur)
+        user = _get_token_user(cur, authorization)
+        points = favorites.apply_point_changes(cur, user["id"], additions, removals)
+        conn.commit()
+    return {"points": points}
 
 
 class GearItem(BaseModel):

@@ -11,13 +11,15 @@ from contextlib import asynccontextmanager, suppress
 
 from dotenv import load_dotenv
 from fastapi import FastAPI
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pymysql import err as db_errors
 
 from app.health import router as health_router, monitor_database
 from app.weather_diagnostics import RequestLogMiddleware, log_environment_status, log_error, request_id_var
-from app.routers import admin, auth, community, fishing, hiking, mountain, notices, radar, weather, wind
+from app.routers import admin, auth, community, fishing, hiking, mountain, notices, radar, recovery, weather, wind
 
 load_dotenv()
 
@@ -37,6 +39,16 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 app.include_router(health_router)
 log_environment_status()
+
+
+@app.exception_handler(RequestValidationError)
+async def redact_credential_validation(request, exc):
+    path = request.url.path.rstrip("/")
+    if path.startswith("/api/auth/recovery/") or path in {
+        "/api/signup", "/api/login", "/api/password/reset", "/api/users/update", "/api/users/delete",
+    }:
+        return JSONResponse(status_code=422, content={"detail": "필수 입력값과 형식을 확인해 주세요"})
+    return await request_validation_exception_handler(request, exc)
 
 
 @app.exception_handler(db_errors.OperationalError)
@@ -78,6 +90,7 @@ app.include_router(mountain.router)
 app.include_router(fishing.router)
 app.include_router(community.router)
 app.include_router(auth.router)
+app.include_router(recovery.router)
 app.include_router(hiking.router)
 app.include_router(admin.router)
 app.include_router(notices.router)

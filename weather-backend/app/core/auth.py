@@ -5,8 +5,7 @@
 import os
 import re
 import hmac
-import base64
-import json
+import secrets
 import time
 import unicodedata
 
@@ -14,7 +13,7 @@ import bcrypt
 from fastapi import HTTPException
 from pydantic import BaseModel
 
-from app.core.schema import _ensure_admin_tables
+from app.core.schema import _ensure_admin_tables, ensure_member_sessions
 
 AUTH_TOKEN_TTL_SECONDS = 60 * 60 * 24 * 7
 
@@ -79,47 +78,47 @@ def _auth_signing_key() -> bytes:
         raise HTTPException(status_code=503, detail="서버 인증 설정이 완료되지 않았습니다")
     return secret.encode("utf-8")
 
-def _encode_token_part(value: bytes) -> str:
-    return base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
+def _session_digest(authorization: str | None):
+    token = authorization[7:] if authorization and authorization.startswith("Bearer ") else ""
+    if not re.fullmatch(r"v2_[A-Za-z0-9_-]{43}", token):
+        raise HTTPException(status_code=401, detail="다시 로그인해 주세요")
+    return hmac.digest(_auth_signing_key(), token.encode("ascii"), "sha256")
 
-def _create_access_token(username: str, version: int = 0) -> str:
-    payload = json.dumps({"sub": username, "ver": version, "exp": int(time.time()) + AUTH_TOKEN_TTL_SECONDS}, separators=(",", ":")).encode("utf-8")
-    encoded_payload = _encode_token_part(payload)
-    signature = hmac.new(_auth_signing_key(), encoded_payload.encode("ascii"), "sha256").digest()
-    return f"{encoded_payload}.{_encode_token_part(signature)}"
 
-def _decode_access_token(authorization: str | None, include_payload: bool = False):
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="로그인이 필요합니다")
-    try:
-        encoded_payload, encoded_signature = authorization[7:].split(".", 1)
-        padding = "=" * (-len(encoded_payload) % 4)
-        payload_bytes = base64.urlsafe_b64decode(encoded_payload + padding)
-        signature_padding = "=" * (-len(encoded_signature) % 4)
-        signature = base64.urlsafe_b64decode(encoded_signature + signature_padding)
-        expected = hmac.new(_auth_signing_key(), encoded_payload.encode("ascii"), "sha256").digest()
-        payload = json.loads(payload_bytes)
-        if not hmac.compare_digest(signature, expected) or int(payload.get("exp", 0)) <= int(time.time()):
-            raise ValueError("invalid token")
-        username = payload.get("sub")
-        if not isinstance(username, str) or not username:
-            raise ValueError("invalid subject")
-        return payload if include_payload else username
-    except HTTPException:
-        raise
-    except Exception:
-        raise HTTPException(status_code=401, detail="로그인 정보가 만료되었거나 올바르지 않습니다")
+def create_member_session(cur, user_id, token_version):
+    token = "v2_" + secrets.token_urlsafe(32)
+    now = int(time.time())
+    cur.execute("DELETE FROM member_sessions WHERE expires_at <= %s ORDER BY expires_at LIMIT 100", (now,))
+    cur.execute(
+        "INSERT INTO member_sessions (token_digest, user_id, token_version, expires_at) VALUES (%s, %s, %s, %s)",
+        (_session_digest("Bearer " + token), user_id, token_version, now + AUTH_TOKEN_TTL_SECONDS),
+    )
+    return token
+
+
+def revoke_member_session(cur, authorization):
+    digest = _session_digest(authorization)
+    ensure_member_sessions(cur)
+    cur.execute("DELETE FROM member_sessions WHERE token_digest = %s", (digest,))
+
 
 def _get_token_user(cur, authorization: str | None):
-    payload = _decode_access_token(authorization, include_payload=True)
+    digest = _session_digest(authorization)
     _ensure_admin_tables(cur)
-    cur.execute("SELECT u.id, u.username, u.name, COALESCE(m.suspended, 0) AS suspended, COALESCE(m.token_version, 0) AS token_version, COALESCE(m.role, 'member') AS role FROM users u LEFT JOIN admin_user_metadata m ON m.user_id = u.id WHERE u.username = %s", (payload['sub'],))
+    ensure_member_sessions(cur)
+    cur.execute("""
+        SELECT u.id, u.username, u.name, s.token_version, COALESCE(m.role, 'member') AS role
+        FROM member_sessions s
+        JOIN users u ON u.id = s.user_id
+        LEFT JOIN admin_user_metadata m ON m.user_id = u.id
+        WHERE s.token_digest = %s AND s.expires_at > %s
+          AND s.token_version = COALESCE(m.token_version, 0) AND COALESCE(m.suspended, 0) = 0
+    """, (digest, int(time.time())))
     user = cur.fetchone()
     if not user:
-        raise HTTPException(status_code=401, detail="계정을 확인할 수 없습니다. 다시 로그인해주세요")
-    if user['suspended'] or payload.get('ver', 0) != user['token_version']:
-        raise HTTPException(status_code=401, detail="계정 상태가 변경되었습니다. 다시 로그인해주세요")
+        raise HTTPException(status_code=401, detail="로그인 정보가 만료되었거나 계정 상태가 변경되었습니다. 다시 로그인해 주세요")
     return user
+
 
 def _hash_pw(password: str) -> str:
     raw = password.encode("utf-8")
@@ -127,8 +126,9 @@ def _hash_pw(password: str) -> str:
         raise HTTPException(status_code=400, detail="비밀번호가 너무 깁니다")
     return bcrypt.hashpw(raw, bcrypt.gensalt()).decode("utf-8")
 
-def _verify_user(cur, username: str, password: str):
-    cur.execute("SELECT * FROM users WHERE username = %s", (username,))
+def _verify_user(cur, username: str, password: str, *, lock=False):
+    query = "SELECT * FROM users WHERE username = %s"
+    cur.execute(query + (" FOR UPDATE" if lock else ""), (username,))
     user = cur.fetchone()
     if not user or len(password.encode("utf-8")) > 72 or not bcrypt.checkpw(password.encode("utf-8"), user["password_hash"].encode("utf-8")):
         raise HTTPException(status_code=401, detail="비밀번호가 올바르지 않습니다")
@@ -138,3 +138,16 @@ def _verify_user(cur, username: str, password: str):
     if metadata and metadata['suspended']:
         raise HTTPException(status_code=403, detail="이용이 정지된 계정입니다")
     return user
+
+
+def _store_password_change(cur, user, new_password, name=None):
+    new_hash = _hash_pw(new_password)
+    if name is None:
+        cur.execute("UPDATE users SET password_hash = %s WHERE id = %s AND BINARY password_hash = %s",
+                    (new_hash, user["id"], user["password_hash"]))
+    else:
+        cur.execute("UPDATE users SET name = %s, password_hash = %s WHERE id = %s AND BINARY password_hash = %s",
+                    (name, new_hash, user["id"], user["password_hash"]))
+    if cur.rowcount != 1:
+        raise HTTPException(status_code=409, detail="비밀번호가 이미 변경되었습니다. 현재 비밀번호를 다시 확인해 주세요")
+    cur.execute("INSERT INTO admin_user_metadata (user_id, token_version) VALUES (%s,1) ON DUPLICATE KEY UPDATE token_version=token_version+1", (user["id"],))

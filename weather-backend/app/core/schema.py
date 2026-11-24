@@ -157,6 +157,73 @@ def _ensure_hiking_tables(cur):
             KEY idx_party_schedule_log (party_id, id),
             CONSTRAINT fk_party_schedule_log_party FOREIGN KEY (party_id) REFERENCES hiking_parties(id) ON DELETE CASCADE
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4""")
+        statements.append("""CREATE TABLE IF NOT EXISTS hiking_party_item_modes (
+    item_id INT NOT NULL PRIMARY KEY,
+    kind VARCHAR(12) NOT NULL,
+    unit VARCHAR(12) NOT NULL DEFAULT '',
+    CONSTRAINT fk_hiking_gear_mode_item FOREIGN KEY (item_id) REFERENCES hiking_party_items(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4""")
+        statements.append("""CREATE TABLE IF NOT EXISTS hiking_party_item_members (
+    item_id INT NOT NULL,
+    party_id INT NOT NULL,
+    user_id INT NOT NULL,
+    quantity SMALLINT UNSIGNED NOT NULL,
+    is_packed TINYINT(1) NOT NULL DEFAULT 0,
+    PRIMARY KEY (item_id, user_id),
+    CONSTRAINT fk_hiking_gear_members_item FOREIGN KEY (item_id) REFERENCES hiking_party_items(id) ON DELETE CASCADE,
+    CONSTRAINT fk_hiking_gear_members_party FOREIGN KEY (party_id, user_id) REFERENCES hiking_party_members(party_id, user_id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4""")
         for statement in statements:
             cur.execute(statement)
         _hiking_schema_ready = True
+
+
+_member_sessions_ready = False
+_member_sessions_lock = threading.Lock()
+
+
+def ensure_member_sessions(cur):
+    global _member_sessions_ready
+    if _member_sessions_ready:
+        return
+    with _member_sessions_lock:
+        if _member_sessions_ready:
+            return
+        cur.execute("""CREATE TABLE IF NOT EXISTS member_sessions (
+    token_digest BINARY(32) NOT NULL PRIMARY KEY,
+    user_id INT NOT NULL,
+    token_version INT NOT NULL,
+    expires_at BIGINT NOT NULL,
+    KEY idx_member_sessions_expiry (expires_at),
+    CONSTRAINT fk_member_sessions_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4""")
+        _member_sessions_ready = True
+
+
+_member_recovery_ready = False
+_member_recovery_lock = threading.Lock()
+
+
+def ensure_member_recovery(cur):
+    global _member_recovery_ready
+    if _member_recovery_ready:
+        return
+    with _member_recovery_lock:
+        if _member_recovery_ready:
+            return
+        cur.execute("""CREATE TABLE IF NOT EXISTS member_recovery_email (
+    user_id INT NOT NULL PRIMARY KEY,
+    email VARCHAR(254) NOT NULL,
+    CONSTRAINT fk_member_recovery_email_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4""")
+        cur.execute("""CREATE TABLE IF NOT EXISTS member_recovery_codes (
+    user_id INT NOT NULL,
+    purpose VARCHAR(12) NOT NULL,
+    email VARCHAR(254) NOT NULL,
+    code_digest BINARY(32) NOT NULL,
+    token_version INT NOT NULL,
+    expires_at BIGINT NOT NULL,
+    PRIMARY KEY (user_id, purpose),
+    CONSTRAINT fk_member_recovery_codes_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4""")
+        _member_recovery_ready = True
