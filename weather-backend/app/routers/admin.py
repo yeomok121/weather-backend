@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 
 from app.database import get_conn
 from app.core.auth import (
-    SignUpRequest, _validate_new_username, _validate_username, _validate_password_username,
+    SignUpRequest, _validate_new_username, _validate_username, validate_new_password,
     _lock_username_changes, _get_token_user, _hash_pw,
 )
 from app.core.schema import _ensure_admin_tables, _ensure_user_favorites_table, _ensure_hiking_tables
@@ -103,9 +103,9 @@ def admin_user_summary(user_id: int, x_admin_password: str | None = Header(defau
 def admin_create_user(req: SignUpRequest, x_admin_password: str | None = Header(default=None), authorization: str | None = Header(default=None)):
     actor = require_admin(x_admin_password, authorization, 'members')
     req.username = _validate_new_username(req.username)
-    if len(req.password) < 4 or not req.name.strip():
+    if not req.name.strip():
         raise HTTPException(status_code=400, detail="입력값을 확인해주세요")
-    _validate_password_username(req.username, req.password)
+    validate_new_password(req.username, req.password)
     conn = get_conn()
     try:
         with conn.cursor() as cur:
@@ -130,10 +130,8 @@ def admin_update_user(user_id: int, req: AdminUserUpdate, x_admin_password: str 
     req.username = _validate_username(req.username)
     if not req.name.strip():
         raise HTTPException(status_code=400, detail="입력값을 확인해주세요")
-    if req.password and len(req.password) < 4:
-        raise HTTPException(status_code=400, detail="비밀번호는 4자 이상이어야 합니다")
     if req.password:
-        _validate_password_username(req.username, req.password)
+        validate_new_password(req.username, req.password)
     conn = get_conn()
     try:
         with conn.cursor() as cur:

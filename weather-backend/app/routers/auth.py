@@ -2,13 +2,14 @@
 import os
 
 import bcrypt
-from fastapi import APIRouter, HTTPException, Header
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, HTTPException, Header, Request
+from pydantic import BaseModel
 
 from app.database import get_conn
+from app.core.auth_attempts import credential_attempt
 from app.core.auth import (
     AUTH_TOKEN_TTL_SECONDS, SignUpRequest, LoginRequest,
-    _validate_new_username, _validate_password_username, _lock_username_changes,
+    _validate_new_username, validate_new_password, _lock_username_changes,
     _auth_signing_key, _create_access_token, _get_token_user, _hash_pw, _verify_user,
 )
 from app.core.schema import _ensure_admin_tables, _ensure_user_favorites_table, _ensure_hiking_tables
@@ -42,9 +43,9 @@ def signup(req: SignUpRequest):
     # Do not create accounts that cannot sign in because the token key is missing.
     _auth_signing_key()
     req.username = _validate_new_username(req.username)
-    if len(req.password) < 4 or not req.name.strip():
+    if not req.name.strip():
         raise HTTPException(status_code=400, detail="입력값을 확인해주세요")
-    _validate_password_username(req.username, req.password)
+    validate_new_password(req.username, req.password)
 
     hashed = _hash_pw(req.password)
 
@@ -68,18 +69,19 @@ def signup(req: SignUpRequest):
     return {"message": "회원가입이 완료되었습니다"}
 
 @router.post("/api/login")
-def login(req: LoginRequest):
-    conn = get_conn()
-    try:
-        with conn.cursor() as cur:
-            _ensure_admin_tables(cur)
-            cur.execute("SELECT u.*, COALESCE(m.suspended, 0) AS suspended, COALESCE(m.token_version, 0) AS token_version FROM users u LEFT JOIN admin_user_metadata m ON m.user_id = u.id WHERE u.username = %s", (req.username,))
-            user = cur.fetchone()
-    finally:
-        conn.close()
+def login(req: LoginRequest, request: Request):
+    with credential_attempt(request, req.username):
+        conn = get_conn()
+        try:
+            with conn.cursor() as cur:
+                _ensure_admin_tables(cur)
+                cur.execute("SELECT u.*, COALESCE(m.suspended, 0) AS suspended, COALESCE(m.token_version, 0) AS token_version FROM users u LEFT JOIN admin_user_metadata m ON m.user_id = u.id WHERE u.username = %s", (req.username,))
+                user = cur.fetchone()
+        finally:
+            conn.close()
 
-    if not user or len(req.password.encode("utf-8")) > 72 or not bcrypt.checkpw(req.password.encode("utf-8"), user["password_hash"].encode("utf-8")):
-        raise HTTPException(status_code=401, detail="아이디 또는 비밀번호가 올바르지 않습니다")
+        if not user or len(req.password.encode("utf-8")) > 72 or not bcrypt.checkpw(req.password.encode("utf-8"), user["password_hash"].encode("utf-8")):
+            raise HTTPException(status_code=401, detail="아이디 또는 비밀번호가 올바르지 않습니다")
     if user['suspended']:
         raise HTTPException(status_code=403, detail="이용이 정지된 계정입니다. 관리자에게 문의해주세요")
     return {
@@ -167,69 +169,73 @@ class DeleteUserRequest(BaseModel):
     username: str
     password: str
 
+def _store_password_change(cur, user, new_password, name=None):
+    new_hash = _hash_pw(new_password)
+    if name is None:
+        cur.execute("UPDATE users SET password_hash = %s WHERE id = %s AND BINARY password_hash = %s",
+                    (new_hash, user["id"], user["password_hash"]))
+    else:
+        cur.execute("UPDATE users SET name = %s, password_hash = %s WHERE id = %s AND BINARY password_hash = %s",
+                    (name, new_hash, user["id"], user["password_hash"]))
+    if cur.rowcount != 1:
+        raise HTTPException(status_code=409, detail="비밀번호가 이미 변경되었습니다. 현재 비밀번호를 다시 확인해 주세요")
+    cur.execute("INSERT INTO admin_user_metadata (user_id, token_version) VALUES (%s,1) ON DUPLICATE KEY UPDATE token_version=token_version+1", (user["id"],))
+
+
 @router.put("/api/users/update")
-def update_user(req: UpdateUserRequest):
+def update_user(req: UpdateUserRequest, request: Request):
     name = req.name.strip()
     if not name:
         raise HTTPException(status_code=400, detail="이름을 입력해주세요")
-    if req.new_password and len(req.new_password) < 4:
-        raise HTTPException(status_code=400, detail="새 비밀번호는 4자 이상이어야 합니다")
     if req.new_password:
-        _validate_password_username(req.username, req.new_password)
+        validate_new_password(req.username, req.new_password)
 
-    conn = get_conn()
-    try:
-        with conn.cursor() as cur:
-            _verify_user(cur, req.username, req.current_password)
-            if req.new_password:
-                cur.execute("UPDATE users SET name = %s, password_hash = %s WHERE username = %s",
-                            (name, _hash_pw(req.new_password), req.username))
-                cur.execute("SELECT id FROM users WHERE username = %s", (req.username,))
-                uid = cur.fetchone()['id']
-                _ensure_admin_tables(cur)
-                cur.execute("INSERT INTO admin_user_metadata (user_id, token_version) VALUES (%s,1) ON DUPLICATE KEY UPDATE token_version=token_version+1", (uid,))
-            else:
-                cur.execute("UPDATE users SET name = %s WHERE username = %s", (name, req.username))
-        conn.commit()
-    finally:
-        conn.close()
+    with credential_attempt(request, req.username):
+        conn = get_conn()
+        try:
+            with conn.cursor() as cur:
+                user = _verify_user(cur, req.username, req.current_password)
+                if req.new_password:
+                    _store_password_change(cur, user, req.new_password, name)
+                else:
+                    cur.execute("UPDATE users SET name = %s WHERE username = %s", (name, req.username))
+            conn.commit()
+        finally:
+            conn.close()
     return {"message": "수정되었습니다", "name": name}
 
 @router.post("/api/users/delete")
-def delete_user(req: DeleteUserRequest):
-    conn = get_conn()
-    try:
-        with conn.cursor() as cur:
-            user = _verify_user(cur, req.username, req.password)
-            _ensure_hiking_tables(cur)
-            cur.execute("SELECT 1 FROM hiking_party_members WHERE user_id = %s LIMIT 1", (user['id'],))
-            if cur.fetchone():
-                raise HTTPException(status_code=409, detail="회원 탈퇴 전에 참여 중인 파티에서 나가거나 파티장 권한을 넘겨 주세요")
-            cur.execute("DELETE FROM users WHERE username = %s", (req.username,))
-        conn.commit()
-    finally:
-        conn.close()
+def delete_user(req: DeleteUserRequest, request: Request):
+    with credential_attempt(request, req.username):
+        conn = get_conn()
+        try:
+            with conn.cursor() as cur:
+                user = _verify_user(cur, req.username, req.password)
+                _ensure_hiking_tables(cur)
+                cur.execute("SELECT 1 FROM hiking_party_members WHERE user_id = %s LIMIT 1", (user['id'],))
+                if cur.fetchone():
+                    raise HTTPException(status_code=409, detail="회원 탈퇴 전에 참여 중인 파티에서 나가거나 파티장 권한을 넘겨 주세요")
+                cur.execute("DELETE FROM users WHERE username = %s", (req.username,))
+            conn.commit()
+        finally:
+            conn.close()
     return {"message": "탈퇴되었습니다"}
 
 class ResetPasswordRequest(BaseModel):
     username: str
-    current_password: str = Field(min_length=4, max_length=72)
+    current_password: str
     new_password: str
 
 @router.post("/api/password/reset")
-def reset_password(req: ResetPasswordRequest):
-    if len(req.new_password) < 4:
-        raise HTTPException(status_code=400, detail="새 비밀번호는 4자 이상이어야 합니다")
-    _validate_password_username(req.username, req.new_password)
-    conn = get_conn()
-    try:
-        with conn.cursor() as cur:
-            user = _verify_user(cur, req.username, req.current_password)
-            cur.execute("UPDATE users SET password_hash = %s WHERE id = %s",
-                        (_hash_pw(req.new_password), user["id"]))
-            _ensure_admin_tables(cur)
-            cur.execute("INSERT INTO admin_user_metadata (user_id, token_version) VALUES (%s,1) ON DUPLICATE KEY UPDATE token_version=token_version+1", (user['id'],))
-        conn.commit()
-    finally:
-        conn.close()
+def reset_password(req: ResetPasswordRequest, request: Request):
+    validate_new_password(req.username, req.new_password)
+    with credential_attempt(request, req.username):
+        conn = get_conn()
+        try:
+            with conn.cursor() as cur:
+                user = _verify_user(cur, req.username, req.current_password)
+                _store_password_change(cur, user, req.new_password)
+            conn.commit()
+        finally:
+            conn.close()
     return {"message": "비밀번호가 변경되었습니다"}

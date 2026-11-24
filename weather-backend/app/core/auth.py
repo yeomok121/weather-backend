@@ -47,6 +47,25 @@ def _validate_password_username(username: str, password: str):
     if normalized_id and normalized_id in normalized_password:
         raise HTTPException(status_code=400, detail='비밀번호에 아이디를 포함할 수 없습니다')
 
+MIN_NEW_PASSWORD_LENGTH = 15
+COMMON_PASSWORDS = {
+    "123456789012345", "1234567890123456", "12345678901234567890",
+    "passwordpassword", "passwordpassword1", "password12345678",
+    "qwertyuiopasdfgh", "qwertyuiopasdfghjkl", "1q2w3e4r5t6y7u8i",
+    "iloveyouiloveyou", "letmeinletmeinletmein",
+}
+
+
+def validate_new_password(username: str, password: str):
+    if len(password) < MIN_NEW_PASSWORD_LENGTH or len(password.encode("utf-8")) > 72:
+        raise HTTPException(status_code=400, detail="새 비밀번호는 15자 이상, UTF-8 기준 72바이트 이하여야 합니다")
+    normalized = unicodedata.normalize("NFKC", password).strip().casefold()
+    repeated = any(normalized == normalized[:size] * (len(normalized) // size) for size in range(1, 5))
+    if not normalized or repeated or normalized in COMMON_PASSWORDS:
+        raise HTTPException(status_code=400, detail="흔하거나 반복되는 비밀번호는 사용할 수 없습니다")
+    _validate_password_username(username, password)
+
+
 def _lock_username_changes(cur):
     # Serialize account creation and username changes even when requests race.
     # MySQL releases this connection-scoped lock when the connection closes.
