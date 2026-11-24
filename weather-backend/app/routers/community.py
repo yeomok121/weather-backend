@@ -30,6 +30,10 @@ class EditRequest(PostRequest):
     keep_photo_ids: list[int] = Field(default_factory=list)  # 남길 기존 사진 (이 순서대로), photos는 새로 더할 사진
 
 
+class CommentRequest(BaseModel):
+    body: str
+
+
 class ReportRequest(BaseModel):
     reason: str = ""
 
@@ -208,6 +212,92 @@ def report_community_post(post_id: int, req: ReportRequest, authorization: str |
     finally:
         conn.close()
     return {"message": "신고를 받았어요. 관리자가 확인할게요." if result["first_time"] else "이미 신고한 글이에요."}
+
+
+# ── 댓글 ── 읽기는 누구나, 쓰기는 로그인. 글쓴이는 마음에 드는 남의 댓글에 하트를 누를 수 있습니다.
+def _visible_post(cur, post_id, viewer):
+    post, owner_id = store.get_post(cur, post_id, viewer)
+    if not post:
+        raise HTTPException(status_code=404, detail="글을 찾을 수 없어요. 지워졌거나 숨겨진 글일 수 있어요.")
+    return post, owner_id
+
+
+@router.get("/api/community/posts/{post_id}/comments")
+def list_community_comments(post_id: int, authorization: str | None = Header(default=None)):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            store.ensure_tables(cur)
+            viewer = _viewer(cur, authorization)
+            _, owner_id = _visible_post(cur, post_id, viewer)
+            return {"comments": store.list_comments(cur, post_id, viewer, owner_id)}
+    finally:
+        conn.close()
+
+
+@router.post("/api/community/posts/{post_id}/comments", status_code=201)
+def add_community_comment(post_id: int, req: CommentRequest, authorization: str | None = Header(default=None)):
+    try:
+        body = rules.clean_comment(req.body)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            user = _get_token_user(cur, authorization)
+            store.ensure_tables(cur)
+            _, owner_id = _visible_post(cur, post_id, user)
+            if store.count_recent_comments(cur, user["id"]) >= rules.DAILY_COMMENT_LIMIT:
+                raise HTTPException(status_code=429, detail=f"댓글은 하루에 {rules.DAILY_COMMENT_LIMIT}개까지 쓸 수 있어요.")
+            store.add_comment(cur, post_id, user["id"], body)
+            comments = store.list_comments(cur, post_id, user, owner_id)
+        conn.commit()
+    finally:
+        conn.close()
+    return {"comments": comments}
+
+
+@router.delete("/api/community/comments/{comment_id}")
+def delete_community_comment(comment_id: int, authorization: str | None = Header(default=None)):
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            user = _get_token_user(cur, authorization)
+            store.ensure_tables(cur)
+            comment = store.get_comment(cur, comment_id)
+            if not comment:
+                raise HTTPException(status_code=404, detail="댓글을 찾을 수 없어요.")
+            if not rules.can_delete(comment["user_id"], user):
+                raise HTTPException(status_code=403, detail="내가 쓴 댓글만 지울 수 있어요.")
+            store.delete_comment(cur, comment_id)
+            comments = store.list_comments(cur, comment["post_id"], user, comment["post_owner_id"])
+        conn.commit()
+    finally:
+        conn.close()
+    return {"comments": comments}
+
+
+@router.post("/api/community/comments/{comment_id}/heart")
+def heart_community_comment(comment_id: int, authorization: str | None = Header(default=None)):
+    """글쓴이 하트: 글쓴이만, 남의 댓글에만. 다시 누르면 취소."""
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            user = _get_token_user(cur, authorization)
+            store.ensure_tables(cur)
+            comment = store.get_comment(cur, comment_id)
+            if not comment or (comment["hidden"] and comment["post_owner_id"] != user["id"]):
+                raise HTTPException(status_code=404, detail="댓글을 찾을 수 없어요.")
+            if comment["post_owner_id"] != user["id"]:
+                raise HTTPException(status_code=403, detail="글쓴이만 하트를 누를 수 있어요.")
+            if comment["user_id"] == user["id"]:
+                raise HTTPException(status_code=400, detail="내 댓글에는 하트를 누를 수 없어요.")
+            store.set_comment_heart(cur, comment_id, not comment["author_hearted"])
+            comments = store.list_comments(cur, comment["post_id"], user, comment["post_owner_id"])
+        conn.commit()
+    finally:
+        conn.close()
+    return {"comments": comments}
 
 
 @router.get("/api/community/photos/{photo_id}")

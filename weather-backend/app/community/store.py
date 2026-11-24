@@ -3,6 +3,7 @@
 - 시각은 UTC로 저장하고 ISO 문자열(…Z)로 돌려줍니다.
 - 사진은 서버에서 다시 저장한 JPEG(최대 1280px, 위치정보 제거)만 MEDIUMBLOB으로 보관합니다.
 - 서로 다른 회원 5명이 신고하면 자동으로 숨깁니다. 관리자는 지울 수 있습니다.
+- 댓글: 글쓴이는 마음에 드는 남의 댓글에 하트(author_hearted)를 누를 수 있습니다.
 - 회원이 탈퇴하면 글·사진·공감·신고가 함께 지워집니다. (ON DELETE CASCADE)
 """
 import threading
@@ -68,6 +69,18 @@ TABLES = [
     CONSTRAINT fk_community_submission_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
     CONSTRAINT fk_community_submission_post FOREIGN KEY (post_id) REFERENCES community_posts(id) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4""",
+    """CREATE TABLE IF NOT EXISTS community_comments (
+        id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+        post_id INT NOT NULL,
+        user_id INT NOT NULL,
+        body VARCHAR(500) NOT NULL,
+        author_hearted TINYINT(1) NOT NULL DEFAULT 0,
+        created_at DATETIME NOT NULL,
+        KEY idx_community_comments_post (post_id, id),
+        KEY idx_community_comments_user (user_id, created_at),
+        CONSTRAINT fk_community_comments_post FOREIGN KEY (post_id) REFERENCES community_posts(id) ON DELETE CASCADE,
+        CONSTRAINT fk_community_comments_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4""",
 ]
 
 
@@ -101,7 +114,8 @@ def _iso(value):
 
 
 POST_COLUMNS = ("p.id, p.user_id, p.category, p.title, p.body, p.point_name, p.species, p.length_cm, p.like_count, "
-                "p.report_count, p.hidden, p.created_at, p.updated_at, u.name AS author")
+                "p.report_count, p.hidden, p.created_at, p.updated_at, u.name AS author, "
+                "(SELECT COUNT(*) FROM community_comments cm WHERE cm.post_id = p.id) AS comment_count")
 
 
 def _attach(cur, rows, viewer):
@@ -127,7 +141,7 @@ def _attach(cur, rows, viewer):
             "length_cm": float(row["length_cm"]) if row["length_cm"] is not None else None,
             "author": row["author"] or "회원", "like_count": row["like_count"], "created_at": _iso(row["created_at"]),
             "updated_at": _iso(row.get("updated_at")) if row.get("updated_at") else None,
-            "photos": photos.get(row["id"], []), "liked": row["id"] in liked,
+            "photos": photos.get(row["id"], []), "liked": row["id"] in liked, "comment_count": row.get("comment_count") or 0,
             "mine": bool(viewer) and viewer["id"] == row["user_id"],
         }
         if moderator:
@@ -253,3 +267,44 @@ def list_reports(cur, limit=50):
                 "(SELECT GROUP_CONCAT(r.reason SEPARATOR ' / ') FROM community_reports r WHERE r.post_id = p.id) AS reasons "
                 "FROM community_posts p LEFT JOIN users u ON u.id = p.user_id WHERE p.report_count > 0 ORDER BY p.report_count DESC, p.id DESC LIMIT %s", (limit,))
     return cur.fetchall()
+
+
+# ── 댓글 ──
+def list_comments(cur, post_id, viewer=None, post_owner_id=None):
+    cur.execute("SELECT c.id, c.user_id, c.body, c.author_hearted, c.created_at, u.name AS author FROM community_comments c "
+                "LEFT JOIN users u ON u.id = c.user_id WHERE c.post_id = %s ORDER BY c.id", (post_id,))
+    viewer_id = viewer["id"] if viewer else None
+    moderator = bool(viewer) and viewer.get("role") in ("superadmin", "member_manager", "notice_manager")
+    return [{
+        "id": row["id"], "body": row["body"], "author": row["author"] or "회원", "created_at": _iso(row["created_at"]),
+        "hearted": bool(row["author_hearted"]),
+        "by_post_author": row["user_id"] == post_owner_id,          # 글쓴이가 단 댓글
+        "mine": viewer_id == row["user_id"],
+        "can_delete": viewer_id == row["user_id"] or moderator,
+        "can_heart": viewer_id is not None and viewer_id == post_owner_id and row["user_id"] != viewer_id,  # 글쓴이가 남의 댓글에만
+    } for row in cur.fetchall()]
+
+
+def count_recent_comments(cur, user_id):
+    cur.execute("SELECT COUNT(*) AS n FROM community_comments WHERE user_id = %s AND created_at >= UTC_TIMESTAMP() - INTERVAL 1 DAY", (user_id,))
+    return cur.fetchone()["n"]
+
+
+def add_comment(cur, post_id, user_id, body):
+    cur.execute("INSERT INTO community_comments (post_id, user_id, body, created_at) VALUES (%s, %s, %s, UTC_TIMESTAMP())", (post_id, user_id, body))
+    return cur.lastrowid
+
+
+def get_comment(cur, comment_id):
+    """댓글과 그 글의 글쓴이·숨김 여부"""
+    cur.execute("SELECT c.id, c.post_id, c.user_id, c.author_hearted, p.user_id AS post_owner_id, p.hidden FROM community_comments c "
+                "JOIN community_posts p ON p.id = c.post_id WHERE c.id = %s", (comment_id,))
+    return cur.fetchone()
+
+
+def delete_comment(cur, comment_id):
+    cur.execute("DELETE FROM community_comments WHERE id = %s", (comment_id,))
+
+
+def set_comment_heart(cur, comment_id, hearted):
+    cur.execute("UPDATE community_comments SET author_hearted = %s WHERE id = %s", (1 if hearted else 0, comment_id))

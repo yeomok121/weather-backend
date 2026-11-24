@@ -21,6 +21,8 @@ MAX_EDGE = 1280                        # 저장할 사진의 긴 변
 TARGET_BYTES = 450 * 1024              # 저장할 사진 한 장 목표 크기
 MAX_PIXELS = 40_000_000                # 압축 폭탄 방지
 DAILY_POST_LIMIT = 10                  # 한 사람이 하루에 쓸 수 있는 글
+MAX_COMMENT = 500
+DAILY_COMMENT_LIMIT = 100              # 한 사람이 하루에 쓸 수 있는 댓글
 CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")  # 줄바꿈(\n)·탭은 남김
 
 
@@ -98,6 +100,11 @@ def process_photo(data_url_or_b64: str) -> dict:
         if out.tell() <= TARGET_BYTES:
             break
     return {"bytes": out.getvalue(), "mime": "image/jpeg", "width": image.width, "height": image.height}
+
+
+def clean_comment(body) -> str:
+    """댓글: 공백 정리(줄바꿈은 남김), 1~500자"""
+    return _text(body, MAX_COMMENT, "댓글", multiline=True)
 
 
 def can_delete(post_user_id: int, user: dict) -> bool:

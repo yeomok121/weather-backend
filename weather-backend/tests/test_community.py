@@ -76,3 +76,12 @@ class PhotoTests(unittest.TestCase):
         Image.new("RGB", (10, 10)).save(gif, "GIF")
         with self.assertRaisesRegex(ValueError, "JPG"):
             rules.process_photo(base64.b64encode(gif.getvalue()).decode())
+
+
+class CommentTests(unittest.TestCase):
+    def test_clean_comment(self):
+        self.assertEqual(rules.clean_comment('  좋아요!\r\n감사\x07해요 '), '좋아요!\n감사해요')
+        with self.assertRaisesRegex(ValueError, "댓글"):
+            rules.clean_comment('   ')
+        with self.assertRaisesRegex(ValueError, "500자"):
+            rules.clean_comment('가' * 501)
