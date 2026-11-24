@@ -12,6 +12,8 @@ from pydantic import BaseModel, Field
 from app.community import rules, store
 from app.core.auth import _get_token_user
 from app.database import get_conn
+from app.routers.admin import require_admin
+from app.core.schema import _ensure_admin_tables
 
 router = APIRouter()
 
@@ -315,16 +317,77 @@ def get_community_photo(photo_id: int):
     return Response(content=photo["bytes"], media_type=photo["mime"], headers={"Cache-Control": "public, max-age=86400"})
 
 
+# ── 관리자: 신고 게시판 (관리자 계정 또는 공용 관리자 비밀번호) ──
+ADMIN_VIEWER = {"id": 0, "role": "superadmin"}  # 숨겨진 글·신고 수까지 보는 관리자 시점
+
+
+def _audit(cur, actor, action, author):
+    _ensure_admin_tables(cur)  # 공용 비밀번호로 들어온 경우에도 기록 테이블 준비
+    if author:
+        cur.execute("INSERT INTO admin_audit_log (actor, action, target_id, target_username) VALUES (%s, %s, %s, %s)",
+                    (actor["name"], action, author["user_id"], author["username"] or ""))
+
+
 @router.get("/api/admin/community/reports")
-def list_community_reports(authorization: str | None = Header(default=None)):
+def list_community_reports(status: str = Query(default="all", pattern="^(all|hidden|visible)$"), page: int = Query(default=1, ge=1),
+                           x_admin_password: str | None = Header(default=None), authorization: str | None = Header(default=None)):
+    require_admin(x_admin_password, authorization)
     conn = get_conn()
     try:
         with conn.cursor() as cur:
-            user = _get_token_user(cur, authorization)
-            if user["role"] not in rules.MODERATOR_ROLES:
-                raise HTTPException(status_code=403, detail="관리자 권한이 없습니다")
             store.ensure_tables(cur)
-            rows = store.list_reports(cur)
+            return store.list_reported_posts(cur, status, page)
     finally:
         conn.close()
-    return {"reports": rows}
+
+
+@router.get("/api/admin/community/posts/{post_id}")
+def admin_community_post(post_id: int, x_admin_password: str | None = Header(default=None), authorization: str | None = Header(default=None)):
+    require_admin(x_admin_password, authorization)
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            store.ensure_tables(cur)
+            post, _ = store.get_post(cur, post_id, ADMIN_VIEWER)
+    finally:
+        conn.close()
+    if not post:
+        raise HTTPException(status_code=404, detail="글을 찾을 수 없어요.")
+    post["mine"] = False
+    return post
+
+
+@router.post("/api/admin/community/posts/{post_id}/restore")
+def admin_restore_community_post(post_id: int, x_admin_password: str | None = Header(default=None), authorization: str | None = Header(default=None)):
+    actor = require_admin(x_admin_password, authorization)
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            store.ensure_tables(cur)
+            author = store.post_author(cur, post_id)
+            if not author:
+                raise HTTPException(status_code=404, detail="글을 찾을 수 없어요.")
+            store.restore_post(cur, post_id)
+            _audit(cur, actor, "community_restore", author)
+        conn.commit()
+    finally:
+        conn.close()
+    return {"message": "신고를 초기화하고 글을 다시 보이게 했어요."}
+
+
+@router.delete("/api/admin/community/posts/{post_id}")
+def admin_delete_community_post(post_id: int, x_admin_password: str | None = Header(default=None), authorization: str | None = Header(default=None)):
+    actor = require_admin(x_admin_password, authorization)
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            store.ensure_tables(cur)
+            author = store.post_author(cur, post_id)
+            if not author:
+                raise HTTPException(status_code=404, detail="글을 찾을 수 없어요.")
+            store.delete_post(cur, post_id)
+            _audit(cur, actor, "community_delete", author)
+        conn.commit()
+    finally:
+        conn.close()
+    return {"message": "글을 지웠어요."}

@@ -262,11 +262,52 @@ def get_photo(cur, photo_id):
     return {"mime": row["mime"], "bytes": bytes(row["data"])}
 
 
-def list_reports(cur, limit=50):
-    cur.execute("SELECT p.id, p.title, p.category, p.hidden, p.report_count, u.name AS author, "
-                "(SELECT GROUP_CONCAT(r.reason SEPARATOR ' / ') FROM community_reports r WHERE r.post_id = p.id) AS reasons "
-                "FROM community_posts p LEFT JOIN users u ON u.id = p.user_id WHERE p.report_count > 0 ORDER BY p.report_count DESC, p.id DESC LIMIT %s", (limit,))
-    return cur.fetchall()
+REPORT_FILTERS = {"all": "", "hidden": " AND p.hidden = 1", "visible": " AND p.hidden = 0"}
+
+
+def list_reported_posts(cur, status="all", page=1, per_page=20):
+    """관리자 신고 게시판: 신고가 1건 이상인 글, 최근 신고 순. 신고 사유(최근 20건)와 첫 사진 id를 함께."""
+    where = "p.report_count > 0" + REPORT_FILTERS.get(status, "")
+    cur.execute(f"SELECT COUNT(*) AS n FROM community_posts p WHERE {where}")
+    total = cur.fetchone()["n"]
+    cur.execute(
+        "SELECT p.id, p.category, p.title, p.hidden, p.report_count, p.created_at, u.name AS author, u.username AS author_username, "
+        "(SELECT MAX(r.created_at) FROM community_reports r WHERE r.post_id = p.id) AS last_reported_at, "
+        "(SELECT MIN(ph.id) FROM community_photos ph WHERE ph.post_id = p.id) AS photo_id, "
+        "(SELECT COUNT(*) FROM community_photos ph WHERE ph.post_id = p.id) AS photo_count "
+        f"FROM community_posts p LEFT JOIN users u ON u.id = p.user_id WHERE {where} "
+        "ORDER BY last_reported_at DESC, p.id DESC LIMIT %s OFFSET %s",
+        (per_page, (max(1, page) - 1) * per_page),
+    )
+    rows = cur.fetchall()
+    reasons = {}
+    if rows:
+        ids = [row["id"] for row in rows]
+        marks = ",".join(["%s"] * len(ids))
+        cur.execute(f"SELECT r.post_id, r.reason, r.created_at, u.name AS reporter FROM community_reports r LEFT JOIN users u ON u.id = r.user_id "
+                    f"WHERE r.post_id IN ({marks}) ORDER BY r.created_at DESC", ids)
+        for row in cur.fetchall():
+            bucket = reasons.setdefault(row["post_id"], [])
+            if len(bucket) < 20:
+                bucket.append({"reason": row["reason"], "reporter": row["reporter"] or "회원", "created_at": _iso(row["created_at"])})
+    items = [{
+        "id": row["id"], "category": row["category"], "title": row["title"], "hidden": bool(row["hidden"]),
+        "report_count": row["report_count"], "author": row["author"] or "회원", "author_username": row["author_username"] or "",
+        "created_at": _iso(row["created_at"]), "last_reported_at": _iso(row["last_reported_at"]),
+        "photo_id": row["photo_id"], "photo_count": row["photo_count"], "reasons": reasons.get(row["id"], []),
+    } for row in rows]
+    return {"items": items, "total": total, "page": max(1, page), "per_page": per_page}
+
+
+def post_author(cur, post_id):
+    cur.execute("SELECT p.user_id, u.username FROM community_posts p LEFT JOIN users u ON u.id = p.user_id WHERE p.id = %s", (post_id,))
+    return cur.fetchone()
+
+
+def restore_post(cur, post_id):
+    """신고 초기화: 신고 기록을 지우고 다시 보이게"""
+    cur.execute("DELETE FROM community_reports WHERE post_id = %s", (post_id,))
+    cur.execute("UPDATE community_posts SET report_count = 0, hidden = 0 WHERE id = %s", (post_id,))
 
 
 # ── 댓글 ──
