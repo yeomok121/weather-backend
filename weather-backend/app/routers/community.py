@@ -23,6 +23,10 @@ class PostRequest(BaseModel):
     photos: list[str] = Field(default_factory=list)
 
 
+class EditRequest(PostRequest):
+    keep_photo_ids: list[int] = Field(default_factory=list)  # 남길 기존 사진 (이 순서대로), photos는 새로 더할 사진
+
+
 class ReportRequest(BaseModel):
     reason: str = ""
 
@@ -90,6 +94,43 @@ def create_community_post(req: PostRequest, authorization: str | None = Header(d
     finally:
         conn.close()
     return created
+
+
+@router.put("/api/community/posts/{post_id}")
+def edit_community_post(post_id: int, req: EditRequest, authorization: str | None = Header(default=None)):
+    """내 글 고치기 (글쓴이만). 금어기·금지체장 확인은 웹에서, 형식·권한·사진 처리는 여기서 다시 합니다."""
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            user = _get_token_user(cur, authorization)
+            store.ensure_tables(cur)
+            post, owner_id = store.get_post(cur, post_id, user)
+            if not post:
+                raise HTTPException(status_code=404, detail="글을 찾을 수 없어요.")
+            if owner_id != user["id"]:
+                raise HTTPException(status_code=403, detail="내가 쓴 글만 고칠 수 있어요.")
+            existing = store.post_photo_ids(cur, post_id)
+            keep = list(dict.fromkeys(req.keep_photo_ids))
+            if any(pid not in existing for pid in keep):
+                raise HTTPException(status_code=400, detail="사진 정보를 확인해 주세요. 새로고침 후 다시 시도해 주세요.")
+            data = req.model_dump()
+            data["photos"] = [*keep, *req.photos]  # 개수·필수 확인은 남길 사진과 새 사진을 합쳐서
+            try:
+                cleaned = rules.clean_post(data, user["role"])
+            except PermissionError as exc:
+                raise HTTPException(status_code=403, detail=str(exc))
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc))
+            try:
+                new_photos = [rules.process_photo(photo) for photo in req.photos]
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc))
+            store.update_post(cur, post_id, cleaned, keep, new_photos)
+            updated, _ = store.get_post(cur, post_id, user)
+        conn.commit()
+    finally:
+        conn.close()
+    return updated
 
 
 @router.delete("/api/community/posts/{post_id}")

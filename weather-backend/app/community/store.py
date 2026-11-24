@@ -26,6 +26,7 @@ TABLES = [
         report_count INT NOT NULL DEFAULT 0,
         hidden TINYINT(1) NOT NULL DEFAULT 0,
         created_at DATETIME NOT NULL,
+        updated_at DATETIME NULL,
         KEY idx_community_posts_list (hidden, category, id),
         KEY idx_community_posts_user (user_id, created_at),
         CONSTRAINT fk_community_posts_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
@@ -70,7 +71,20 @@ def ensure_tables(cur):
             return
         for sql in TABLES:
             cur.execute(sql)
+        _add_missing_columns(cur)
         _ready = True
+
+
+# 나중에 더한 칸: 이미 만들어진 실제 DB에도 한 번만 추가합니다. (ADD COLUMN IF NOT EXISTS는 MySQL 8에 없어서 직접 확인)
+LATER_COLUMNS = [("community_posts", "updated_at", "ALTER TABLE community_posts ADD COLUMN updated_at DATETIME NULL AFTER created_at")]
+
+
+def _add_missing_columns(cur):
+    for table, column, ddl in LATER_COLUMNS:
+        cur.execute("SELECT COUNT(*) AS n FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s AND COLUMN_NAME = %s",
+                    (table, column))
+        if cur.fetchone()["n"] == 0:
+            cur.execute(ddl)
 
 
 def _iso(value):
@@ -78,7 +92,7 @@ def _iso(value):
 
 
 POST_COLUMNS = ("p.id, p.user_id, p.category, p.title, p.body, p.point_name, p.species, p.length_cm, p.like_count, "
-                "p.report_count, p.hidden, p.created_at, u.name AS author")
+                "p.report_count, p.hidden, p.created_at, p.updated_at, u.name AS author")
 
 
 def _attach(cur, rows, viewer):
@@ -103,6 +117,7 @@ def _attach(cur, rows, viewer):
             "point_name": row["point_name"], "species": row["species"],
             "length_cm": float(row["length_cm"]) if row["length_cm"] is not None else None,
             "author": row["author"] or "회원", "like_count": row["like_count"], "created_at": _iso(row["created_at"]),
+            "updated_at": _iso(row.get("updated_at")) if row.get("updated_at") else None,
             "photos": photos.get(row["id"], []), "liked": row["id"] in liked,
             "mine": bool(viewer) and viewer["id"] == row["user_id"],
         }
@@ -160,6 +175,30 @@ def get_post(cur, post_id, viewer=None):
     if row["hidden"] and not moderator and not (viewer and viewer["id"] == row["user_id"]):
         return None, None
     return _attach(cur, [row], viewer)[0], row["user_id"]
+
+
+def post_photo_ids(cur, post_id):
+    cur.execute("SELECT id FROM community_photos WHERE post_id = %s ORDER BY sort_order", (post_id,))
+    return [row["id"] for row in cur.fetchall()]
+
+
+def update_post(cur, post_id, post, keep_photo_ids, new_photos):
+    """글 고치기: 남길 사진(keep, 이 순서대로) + 새 사진(뒤에)으로 다시 정렬하고 수정 시각을 남깁니다."""
+    cur.execute(
+        "UPDATE community_posts SET category = %s, title = %s, body = %s, point_name = %s, species = %s, length_cm = %s, "
+        "updated_at = UTC_TIMESTAMP() WHERE id = %s",
+        (post["category"], post["title"], post["body"], post["point_name"], post["species"], post["length_cm"], post_id),
+    )
+    existing = post_photo_ids(cur, post_id)
+    gone = [pid for pid in existing if pid not in keep_photo_ids]
+    if gone:
+        marks = ",".join(["%s"] * len(gone))
+        cur.execute(f"DELETE FROM community_photos WHERE post_id = %s AND id IN ({marks})", [post_id, *gone])
+    for order, pid in enumerate(keep_photo_ids):
+        cur.execute("UPDATE community_photos SET sort_order = %s WHERE id = %s AND post_id = %s", (order, pid, post_id))
+    for order, photo in enumerate(new_photos, start=len(keep_photo_ids)):
+        cur.execute("INSERT INTO community_photos (post_id, sort_order, mime, width, height, data) VALUES (%s, %s, %s, %s, %s, %s)",
+                    (post_id, order, photo["mime"], photo["width"], photo["height"], photo["bytes"]))
 
 
 def delete_post(cur, post_id):
