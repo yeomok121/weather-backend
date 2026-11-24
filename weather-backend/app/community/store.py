@@ -75,11 +75,23 @@ TABLES = [
         user_id INT NOT NULL,
         body VARCHAR(500) NOT NULL,
         author_hearted TINYINT(1) NOT NULL DEFAULT 0,
+        report_count INT NOT NULL DEFAULT 0,
+        hidden TINYINT(1) NOT NULL DEFAULT 0,
         created_at DATETIME NOT NULL,
         KEY idx_community_comments_post (post_id, id),
         KEY idx_community_comments_user (user_id, created_at),
         CONSTRAINT fk_community_comments_post FOREIGN KEY (post_id) REFERENCES community_posts(id) ON DELETE CASCADE,
         CONSTRAINT fk_community_comments_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4""",
+    """CREATE TABLE IF NOT EXISTS community_comment_reports (
+        id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+        comment_id INT NOT NULL,
+        user_id INT NOT NULL,
+        reason VARCHAR(200) NOT NULL,
+        created_at DATETIME NOT NULL,
+        UNIQUE KEY uq_community_comment_reports (comment_id, user_id),
+        CONSTRAINT fk_community_comment_reports_comment FOREIGN KEY (comment_id) REFERENCES community_comments(id) ON DELETE CASCADE,
+        CONSTRAINT fk_community_comment_reports_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4""",
 ]
 
@@ -98,7 +110,11 @@ def ensure_tables(cur):
 
 
 # 나중에 더한 칸: 이미 만들어진 실제 DB에도 한 번만 추가합니다. (ADD COLUMN IF NOT EXISTS는 MySQL 8에 없어서 직접 확인)
-LATER_COLUMNS = [("community_posts", "updated_at", "ALTER TABLE community_posts ADD COLUMN updated_at DATETIME NULL AFTER created_at")]
+LATER_COLUMNS = [
+    ("community_posts", "updated_at", "ALTER TABLE community_posts ADD COLUMN updated_at DATETIME NULL AFTER created_at"),
+    ("community_comments", "report_count", "ALTER TABLE community_comments ADD COLUMN report_count INT NOT NULL DEFAULT 0 AFTER author_hearted"),
+    ("community_comments", "hidden", "ALTER TABLE community_comments ADD COLUMN hidden TINYINT(1) NOT NULL DEFAULT 0 AFTER report_count"),
+]
 
 
 def _add_missing_columns(cur):
@@ -115,7 +131,7 @@ def _iso(value):
 
 POST_COLUMNS = ("p.id, p.user_id, p.category, p.title, p.body, p.point_name, p.species, p.length_cm, p.like_count, "
                 "p.report_count, p.hidden, p.created_at, p.updated_at, u.name AS author, "
-                "(SELECT COUNT(*) FROM community_comments cm WHERE cm.post_id = p.id) AS comment_count")
+                "(SELECT COUNT(*) FROM community_comments cm WHERE cm.post_id = p.id AND cm.hidden = 0) AS comment_count")
 
 
 def _attach(cur, rows, viewer):
@@ -312,18 +328,29 @@ def restore_post(cur, post_id):
 
 # ── 댓글 ──
 def list_comments(cur, post_id, viewer=None, post_owner_id=None):
-    cur.execute("SELECT c.id, c.user_id, c.body, c.author_hearted, c.created_at, u.name AS author FROM community_comments c "
+    cur.execute("SELECT c.id, c.user_id, c.body, c.author_hearted, c.report_count, c.hidden, c.created_at, u.name AS author FROM community_comments c "
                 "LEFT JOIN users u ON u.id = c.user_id WHERE c.post_id = %s ORDER BY c.id", (post_id,))
     viewer_id = viewer["id"] if viewer else None
     moderator = bool(viewer) and viewer.get("role") in ("superadmin", "member_manager", "notice_manager")
-    return [{
-        "id": row["id"], "body": row["body"], "author": row["author"] or "회원", "created_at": _iso(row["created_at"]),
-        "hearted": bool(row["author_hearted"]),
-        "by_post_author": row["user_id"] == post_owner_id,          # 글쓴이가 단 댓글
-        "mine": viewer_id == row["user_id"],
-        "can_delete": viewer_id == row["user_id"] or moderator,
-        "can_heart": viewer_id is not None and viewer_id == post_owner_id and row["user_id"] != viewer_id,  # 글쓴이가 남의 댓글에만
-    } for row in cur.fetchall()]
+    result = []
+    for row in cur.fetchall():
+        mine = viewer_id is not None and viewer_id == row["user_id"]
+        if row["hidden"] and not (mine or moderator):
+            continue  # 신고로 숨겨진 댓글은 쓴 사람과 관리자에게만
+        item = {
+            "id": row["id"], "body": row["body"], "author": row["author"] or "회원", "created_at": _iso(row["created_at"]),
+            "hearted": bool(row["author_hearted"]),
+            "by_post_author": row["user_id"] == post_owner_id,          # 글쓴이가 단 댓글
+            "mine": mine,
+            "hidden": bool(row["hidden"]),
+            "can_delete": mine or moderator,
+            "can_heart": viewer_id is not None and viewer_id == post_owner_id and not mine,  # 글쓴이가 남의 댓글에만
+            "can_report": viewer_id is not None and not mine,
+        }
+        if moderator:
+            item["report_count"] = row["report_count"]
+        result.append(item)
+    return result
 
 
 def count_recent_comments(cur, user_id):
@@ -338,7 +365,7 @@ def add_comment(cur, post_id, user_id, body):
 
 def get_comment(cur, comment_id):
     """댓글과 그 글의 글쓴이·숨김 여부"""
-    cur.execute("SELECT c.id, c.post_id, c.user_id, c.author_hearted, p.user_id AS post_owner_id, p.hidden FROM community_comments c "
+    cur.execute("SELECT c.id, c.post_id, c.user_id, c.author_hearted, c.hidden AS comment_hidden, p.user_id AS post_owner_id, p.hidden FROM community_comments c "
                 "JOIN community_posts p ON p.id = c.post_id WHERE c.id = %s", (comment_id,))
     return cur.fetchone()
 
@@ -349,3 +376,56 @@ def delete_comment(cur, comment_id):
 
 def set_comment_heart(cur, comment_id, hearted):
     cur.execute("UPDATE community_comments SET author_hearted = %s WHERE id = %s", (1 if hearted else 0, comment_id))
+
+
+# ── 댓글 신고 ──
+def report_comment(cur, comment_id, user_id, reason):
+    cur.execute("INSERT IGNORE INTO community_comment_reports (comment_id, user_id, reason, created_at) VALUES (%s, %s, %s, UTC_TIMESTAMP())",
+                (comment_id, user_id, reason))
+    first = cur.rowcount == 1
+    cur.execute("UPDATE community_comments SET report_count = (SELECT COUNT(*) FROM community_comment_reports WHERE comment_id = %s), "
+                "hidden = IF((SELECT COUNT(*) FROM community_comment_reports WHERE comment_id = %s) >= %s, 1, hidden) WHERE id = %s",
+                (comment_id, comment_id, AUTO_HIDE_REPORTS, comment_id))
+    return first
+
+
+def list_reported_comments(cur, status="all", page=1, per_page=20):
+    """관리자 신고 게시판(댓글): 신고가 1건 이상인 댓글, 최근 신고 순. 어느 글의 댓글인지와 신고 사유(최근 20건)."""
+    where = "c.report_count > 0" + {"all": "", "hidden": " AND c.hidden = 1", "visible": " AND c.hidden = 0"}.get(status, "")
+    cur.execute(f"SELECT COUNT(*) AS n FROM community_comments c WHERE {where}")
+    total = cur.fetchone()["n"]
+    cur.execute(
+        "SELECT c.id, c.body, c.hidden, c.report_count, c.created_at, c.post_id, p.title AS post_title, u.name AS author, u.username AS author_username, "
+        "(SELECT MAX(r.created_at) FROM community_comment_reports r WHERE r.comment_id = c.id) AS last_reported_at "
+        f"FROM community_comments c JOIN community_posts p ON p.id = c.post_id LEFT JOIN users u ON u.id = c.user_id WHERE {where} "
+        "ORDER BY last_reported_at DESC, c.id DESC LIMIT %s OFFSET %s",
+        (per_page, (max(1, page) - 1) * per_page),
+    )
+    rows = cur.fetchall()
+    reasons = {}
+    if rows:
+        ids = [row["id"] for row in rows]
+        marks = ",".join(["%s"] * len(ids))
+        cur.execute(f"SELECT r.comment_id, r.reason, r.created_at, u.name AS reporter FROM community_comment_reports r LEFT JOIN users u ON u.id = r.user_id "
+                    f"WHERE r.comment_id IN ({marks}) ORDER BY r.created_at DESC", ids)
+        for row in cur.fetchall():
+            bucket = reasons.setdefault(row["comment_id"], [])
+            if len(bucket) < 20:
+                bucket.append({"reason": row["reason"], "reporter": row["reporter"] or "회원", "created_at": _iso(row["created_at"])})
+    items = [{
+        "id": row["id"], "body": row["body"], "hidden": bool(row["hidden"]), "report_count": row["report_count"],
+        "author": row["author"] or "회원", "author_username": row["author_username"] or "", "created_at": _iso(row["created_at"]),
+        "post_id": row["post_id"], "post_title": row["post_title"], "last_reported_at": _iso(row["last_reported_at"]),
+        "reasons": reasons.get(row["id"], []),
+    } for row in rows]
+    return {"items": items, "total": total, "page": max(1, page), "per_page": per_page}
+
+
+def comment_author(cur, comment_id):
+    cur.execute("SELECT c.user_id, u.username FROM community_comments c LEFT JOIN users u ON u.id = c.user_id WHERE c.id = %s", (comment_id,))
+    return cur.fetchone()
+
+
+def restore_comment(cur, comment_id):
+    cur.execute("DELETE FROM community_comment_reports WHERE comment_id = %s", (comment_id,))
+    cur.execute("UPDATE community_comments SET report_count = 0, hidden = 0 WHERE id = %s", (comment_id,))

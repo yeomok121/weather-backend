@@ -7,7 +7,7 @@
 | 날씨 | `app/routers/weather.py`, `app/weather.py`, `app/advice.py` | `/api/weather/*`, `/api/location/search` |
 | 산악 | `app/routers/mountain.py`, `app/routers/hiking.py`, `app/mountain_catalog.json` | `/api/mountain/*`, `/api/users/me/hiking-plans`, `/api/hiking/parties/*` |
 | 낚시 | `app/routers/fishing.py`, `app/fishing/` | `/api/fishing/areas`, `/api/fishing/points`, `/api/fishing/summary`, `/api/users/me/fishing-points`, `/api/users/me/fishing-gear` |
-| 낚시 커뮤니티 | `app/routers/community.py`, `app/community/` | `/api/community/posts` (목록·쓰기·수정·삭제), `/api/community/posts/{id}/comments`, `/api/community/comments/{id}/heart`, `/api/community/photos/{id}`, 관리자 `/api/admin/community/reports`·`/api/admin/community/posts/{id}`(보기·restore·삭제) |
+| 낚시 커뮤니티 | `app/routers/community.py`, `app/community/` | `/api/community/posts` (목록·쓰기·수정·삭제), `/api/community/posts/{id}/comments`, `/api/community/comments/{id}/heart`, `/api/community/photos/{id}`, `/api/community/comments/{id}/report`, 관리자 `/api/admin/community/reports`·`comment-reports`·`posts/{id}`·`comments/{id}`(restore·삭제) |
 | 관리자 | `app/routers/admin.py`, `app/routers/notices.py` | `/api/admin/*`, `/api/notices` |
 
 ## 낚시 백엔드 (`app/fishing/`)

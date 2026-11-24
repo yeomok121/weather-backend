@@ -294,12 +294,35 @@ def heart_community_comment(comment_id: int, authorization: str | None = Header(
                 raise HTTPException(status_code=403, detail="글쓴이만 하트를 누를 수 있어요.")
             if comment["user_id"] == user["id"]:
                 raise HTTPException(status_code=400, detail="내 댓글에는 하트를 누를 수 없어요.")
+            if comment["comment_hidden"]:
+                raise HTTPException(status_code=400, detail="신고로 숨겨진 댓글이에요.")
             store.set_comment_heart(cur, comment_id, not comment["author_hearted"])
             comments = store.list_comments(cur, comment["post_id"], user, comment["post_owner_id"])
         conn.commit()
     finally:
         conn.close()
     return {"comments": comments}
+
+
+@router.post("/api/community/comments/{comment_id}/report")
+def report_community_comment(comment_id: int, req: ReportRequest, authorization: str | None = Header(default=None)):
+    """댓글 신고: 로그인한 회원이 남의 댓글에 한 번씩. 5명이 신고하면 자동으로 숨김 (쓴 사람·관리자에게만 보임)."""
+    reason = " ".join(str(req.reason or "").split())[:200] or "사유 없음"
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            user = _get_token_user(cur, authorization)
+            store.ensure_tables(cur)
+            comment = store.get_comment(cur, comment_id)
+            if not comment or comment["hidden"]:
+                raise HTTPException(status_code=404, detail="댓글을 찾을 수 없어요.")
+            if comment["user_id"] == user["id"]:
+                raise HTTPException(status_code=400, detail="내 댓글은 신고할 수 없어요.")
+            first = store.report_comment(cur, comment_id, user["id"], reason)
+        conn.commit()
+    finally:
+        conn.close()
+    return {"message": "신고를 받았어요. 관리자가 확인할게요." if first else "이미 신고한 댓글이에요."}
 
 
 @router.get("/api/community/photos/{photo_id}")
@@ -391,3 +414,53 @@ def admin_delete_community_post(post_id: int, x_admin_password: str | None = Hea
     finally:
         conn.close()
     return {"message": "글을 지웠어요."}
+
+
+# ── 관리자: 댓글 신고 ──
+@router.get("/api/admin/community/comment-reports")
+def list_community_comment_reports(status: str = Query(default="all", pattern="^(all|hidden|visible)$"), page: int = Query(default=1, ge=1),
+                                   x_admin_password: str | None = Header(default=None), authorization: str | None = Header(default=None)):
+    require_admin(x_admin_password, authorization)
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            store.ensure_tables(cur)
+            return store.list_reported_comments(cur, status, page)
+    finally:
+        conn.close()
+
+
+@router.post("/api/admin/community/comments/{comment_id}/restore")
+def admin_restore_community_comment(comment_id: int, x_admin_password: str | None = Header(default=None), authorization: str | None = Header(default=None)):
+    actor = require_admin(x_admin_password, authorization)
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            store.ensure_tables(cur)
+            author = store.comment_author(cur, comment_id)
+            if not author:
+                raise HTTPException(status_code=404, detail="댓글을 찾을 수 없어요.")
+            store.restore_comment(cur, comment_id)
+            _audit(cur, actor, "community_comment_restore", author)
+        conn.commit()
+    finally:
+        conn.close()
+    return {"message": "댓글 신고를 초기화하고 다시 보이게 했어요."}
+
+
+@router.delete("/api/admin/community/comments/{comment_id}")
+def admin_delete_community_comment(comment_id: int, x_admin_password: str | None = Header(default=None), authorization: str | None = Header(default=None)):
+    actor = require_admin(x_admin_password, authorization)
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            store.ensure_tables(cur)
+            author = store.comment_author(cur, comment_id)
+            if not author:
+                raise HTTPException(status_code=404, detail="댓글을 찾을 수 없어요.")
+            store.delete_comment(cur, comment_id)
+            _audit(cur, actor, "community_comment_delete", author)
+        conn.commit()
+    finally:
+        conn.close()
+    return {"message": "댓글을 지웠어요."}
