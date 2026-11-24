@@ -2,6 +2,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import bcrypt
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
@@ -25,7 +26,7 @@ class PasswordSecurityTests(unittest.TestCase):
         ):
             clock.return_value = 1000
             login = {"username": "demo1", "password": "wrong"}
-            change = {"username": "demo1", "current_password": "wrong", "new_password": "Cloudy trails near dawn"}
+            change = {"username": "demo1", "current_password": "wrong", "new_password": "Cloudy trails near dawn!"}
             for _ in range(4):
                 self.assertEqual(client.post("/api/login", json=login).status_code, 401)
             self.assertEqual(client.post("/api/password/reset", json=change).status_code, 401)
@@ -55,10 +56,36 @@ class PasswordSecurityTests(unittest.TestCase):
             self.assertEqual(blocked.exception.status_code, 429)
 
     def test_password_rule_applies_to_new_secrets(self):
-        for password in ("short", "passwordpassword", "abcdabcdabcdabcd", "demo1 with a long phrase", "비" * 25):
+        for password in ("short!", "12345678", "alphabet", "123456７８", "abc!abc!", "demo1 with a long phrase!", "비" * 25 + "!"):
             with self.subTest(password=password), self.assertRaises(HTTPException):
                 validate_new_password("demo1", password)
-        validate_new_password("demo1", "Cloudy trails near dawn")
+        validate_new_password("demo1", "Cloud!78")
+        validate_new_password("demo1", "Cloudy trails near dawn!")
+
+    def test_legacy_password_still_signs_in(self):
+        app = FastAPI()
+        app.include_router(auth.router)
+        connection = MagicMock()
+        cursor = connection.cursor.return_value.__enter__.return_value
+        cursor.fetchone.return_value = {
+            "id": 1, "username": "legacy1", "name": "Test", "suspended": 0, "token_version": 0,
+            "password_hash": bcrypt.hashpw(b"1234", bcrypt.gensalt(rounds=4)).decode(),
+        }
+        with (
+            TestClient(app) as client,
+            patch.object(auth_attempts, "_buckets", {}),
+            patch.object(auth, "get_conn", return_value=connection),
+            patch.object(auth, "_ensure_admin_tables"),
+            patch.object(auth, "ensure_member_sessions"),
+            patch.object(auth, "create_member_session", return_value="test-token"),
+        ):
+            response = client.post("/api/login", json={"username": "legacy1", "password": "1234"})
+            cursor.fetchone.return_value["password_hash"] = bcrypt.hashpw(b"Cloud!78", bcrypt.gensalt(rounds=4)).decode()
+            compliant = client.post("/api/login", json={"username": "legacy1", "password": "Cloud!78"})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["access_token"], "test-token")
+        self.assertIs(response.json()["password_needs_update"], True)
+        self.assertIs(compliant.json()["password_needs_update"], False)
 
     def test_stale_password_hash_does_not_invalidate_sessions_or_commit(self):
         app = FastAPI()
@@ -74,7 +101,7 @@ class PasswordSecurityTests(unittest.TestCase):
             patch("app.core.auth._hash_pw", return_value="new-hash"),
         ):
             response = client.post("/api/password/reset", json={
-                "username": "demo1", "current_password": "old", "new_password": "Cloudy trails near dawn",
+                "username": "demo1", "current_password": "old", "new_password": "Cloudy trails near dawn!",
             })
             self.assertEqual(response.status_code, 409)
             cursor.execute.assert_called_once()
@@ -84,7 +111,7 @@ class PasswordSecurityTests(unittest.TestCase):
 
             cursor.rowcount = 1
             response = client.post("/api/password/reset", json={
-                "username": "demo1", "current_password": "old", "new_password": "Cloudy trails near dawn",
+                "username": "demo1", "current_password": "old", "new_password": "Cloudy trails near dawn!",
             })
             self.assertEqual(response.status_code, 200)
             self.assertIn("token_version=token_version+1", cursor.execute.call_args.args[0])

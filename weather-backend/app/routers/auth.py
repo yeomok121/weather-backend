@@ -9,7 +9,7 @@ from app.database import get_conn
 from app.core.auth_attempts import credential_attempt
 from app.core.auth import (
     AUTH_TOKEN_TTL_SECONDS, SignUpRequest, LoginRequest,
-    _validate_new_username, validate_new_password, _lock_username_changes,
+    _validate_new_username, validate_new_password, password_needs_update, _lock_username_changes,
     _auth_signing_key, create_member_session, revoke_member_session, _store_password_change, _get_token_user, _hash_pw, _verify_user,
 )
 from app.core.schema import _ensure_admin_tables, _ensure_user_favorites_table, _ensure_hiking_tables, ensure_member_sessions
@@ -92,6 +92,7 @@ def login(req: LoginRequest, request: Request):
         "name": user["name"],
         "username": user["username"],
         "user_id": user["id"],
+        "password_needs_update": password_needs_update(user["username"], req.password),
         "access_token": token,
         "token_type": "bearer",
         "expires_in": AUTH_TOKEN_TTL_SECONDS,
