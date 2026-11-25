@@ -1,20 +1,51 @@
 import unittest
+from datetime import date, datetime
+from uuid import uuid4
 from unittest.mock import MagicMock, patch
 
 from fastapi.testclient import TestClient
 
 from app.main import app
-from app.routers import notices
+from app.routers import admin, notices
 
 
 class AdminOperationsTests(unittest.TestCase):
     def test_admin_reads_and_candidate_write_require_authentication(self):
         client = TestClient(app)
-        for path in ("/api/admin/activity", "/api/admin/mountain-candidates", "/api/admin/notices"):
+        for path in ("/api/admin/activity", "/api/admin/mountain-candidates", "/api/admin/notices", "/api/admin/usage"):
             with self.subTest(path=path):
                 self.assertEqual(client.get(path).status_code, 401)
         response = client.put("/api/admin/mountain-candidates", json={"name": "북한산", "kind": "course"})
         self.assertEqual(response.status_code, 401)
+
+    def test_public_usage_rejects_non_service_pages_and_unknown_mountain_names(self):
+        client = TestClient(app)
+        ids = {"event_id": str(uuid4()), "browser_id": str(uuid4())}
+        self.assertEqual(client.post("/api/page-views", json={**ids, "page": "admin"}).status_code, 422)
+        self.assertEqual(client.post("/api/page-views", json={**ids, "page": "mountain", "mountain": "등록되지 않은 산"}).status_code, 422)
+        self.assertEqual(client.post("/api/page-views", json={**ids, "page": "weather", "mountain": "북한산"}).status_code, 422)
+
+    @patch.object(admin, "_usage_window", return_value=(date(2026, 11, 19), datetime(2026, 11, 18, 15)))
+    @patch.object(admin, "get_conn")
+    @patch.object(admin, "require_admin")
+    def test_usage_distinguishes_uncollected_days_from_zero_views(self, auth, connect, window):
+        cursor = connect.return_value.cursor.return_value.__enter__.return_value
+        cursor.fetchone.side_effect = [
+            {"started_at": datetime(2026, 11, 23, 15)},
+            {"visitors": 1, "views": 2},
+            {"total": 5, "not_found": 1}, {"total": 6, "not_found": 2}, {"total": 7, "not_found": 0},
+        ]
+        cursor.fetchall.side_effect = [
+            [{"day": date(2026, 11, 24), "visitors": 1, "views": 2}],
+            [{"page": "mountain", "views": 2}],
+            [{"mountain": "북한산", "views": 2}],
+        ]
+        result = admin.admin_usage(7, None, "test")
+        auth.assert_called_once_with(None, "test", "system")
+        self.assertEqual(result["daily"][4]["views"], None)
+        self.assertEqual(result["daily"][5]["views"], 2)
+        self.assertEqual(result["daily"][6]["views"], 0)
+        self.assertEqual(result["totals"], {"visitors": 1, "views": 2, "searches": 11, "no_results": 3, "fishing_selections": 7})
 
     @patch.object(notices, "_ensure_admin_tables")
     @patch.object(notices, "_ensure_notices_table")

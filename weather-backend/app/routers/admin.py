@@ -2,10 +2,11 @@
 import os
 import hmac
 import re
+from datetime import datetime, time, timedelta, timezone
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Header, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, UUID4
 
 from app.database import get_conn
 from app.core.auth import (
@@ -321,6 +322,133 @@ def _prepare_search_events(cur, table):
     cur.execute(f"DELETE FROM {table} WHERE searched_at < UTC_TIMESTAMP() - INTERVAL 30 DAY")
 
 
+KST = timezone(timedelta(hours=9))
+
+
+def _usage_window(days):
+    if days not in (7, 30):
+        raise HTTPException(status_code=422, detail="7일 또는 30일을 선택하세요.")
+    today = datetime.now(KST).date()
+    first_day = today - timedelta(days=days - 1)
+    from_utc = datetime.combine(first_day, time.min, KST).astimezone(timezone.utc).replace(tzinfo=None)
+    return first_day, from_utc
+
+
+class PageViewEvent(BaseModel):
+    event_id: UUID4
+    browser_id: UUID4
+    page: Literal["weather", "mountain", "fishing", "community"]
+    mountain: str | None = Field(default=None, max_length=24)
+
+
+def _prepare_page_views(cur):
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS site_page_views (
+            event_id CHAR(36) PRIMARY KEY,
+            browser_id CHAR(36) NOT NULL,
+            page VARCHAR(12) NOT NULL,
+            mountain VARCHAR(24),
+            viewed_at DATETIME NOT NULL,
+            INDEX ix_site_page_views_time (viewed_at)
+        ) DEFAULT CHARSET=utf8mb4
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS site_page_view_collection (
+            id TINYINT UNSIGNED PRIMARY KEY,
+            started_at DATETIME NOT NULL
+        )
+    """)
+
+
+@router.post("/api/page-views", status_code=204)
+def record_page_view(event: PageViewEvent):
+    if event.mountain is not None:
+        from app.weather import MOUNTAINS_DB
+
+        if event.page != "mountain" or event.mountain not in MOUNTAINS_DB:
+            raise HTTPException(status_code=422, detail="등록된 산만 선택할 수 있습니다.")
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            _prepare_page_views(cur)
+            cur.execute("INSERT IGNORE INTO site_page_view_collection VALUES (1, UTC_TIMESTAMP())")
+            cur.execute("""
+                INSERT INTO site_page_views (event_id, browser_id, page, mountain, viewed_at)
+                VALUES (%s, %s, %s, %s, UTC_TIMESTAMP())
+                ON DUPLICATE KEY UPDATE event_id = event_id
+            """, (str(event.event_id), str(event.browser_id), event.page, event.mountain))
+            cur.execute("DELETE FROM site_page_views WHERE viewed_at < UTC_TIMESTAMP() - INTERVAL 30 DAY")
+        conn.commit()
+    finally:
+        conn.close()
+
+
+@router.get("/api/admin/usage")
+def admin_usage(days: int = Query(default=7), x_admin_password: str | None = Header(default=None),
+                authorization: str | None = Header(default=None)):
+    require_admin(x_admin_password, authorization, "system")
+    first_day, from_utc = _usage_window(days)
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            _prepare_page_views(cur)
+            cur.execute("SELECT started_at FROM site_page_view_collection WHERE id = 1")
+            collection = cur.fetchone()
+            started_at = collection["started_at"].replace(tzinfo=timezone.utc) if collection else None
+            cur.execute("""
+                SELECT COUNT(*) AS views, COUNT(DISTINCT browser_id) AS visitors
+                FROM site_page_views WHERE viewed_at >= %s
+            """, (from_utc,))
+            totals = cur.fetchone()
+            cur.execute("""
+                SELECT DATE(viewed_at + INTERVAL 9 HOUR) AS day, COUNT(*) AS views,
+                       COUNT(DISTINCT browser_id) AS visitors
+                FROM site_page_views WHERE viewed_at >= %s GROUP BY day
+            """, (from_utc,))
+            daily = {row["day"]: row for row in cur.fetchall()}
+            cur.execute("""
+                SELECT page, COUNT(*) AS views FROM site_page_views WHERE viewed_at >= %s
+                GROUP BY page ORDER BY views DESC, page
+            """, (from_utc,))
+            pages = cur.fetchall()
+            cur.execute("""
+                SELECT mountain, COUNT(*) AS views FROM site_page_views
+                WHERE viewed_at >= %s AND page = 'mountain' AND mountain IS NOT NULL
+                GROUP BY mountain ORDER BY views DESC, mountain LIMIT 10
+            """, (from_utc,))
+            mountains = cur.fetchall()
+            cur.execute("DELETE FROM site_page_views WHERE viewed_at < UTC_TIMESTAMP() - INTERVAL 30 DAY")
+            search_counts = {}
+            for service, table in SEARCH_TABLES.items():
+                _prepare_search_events(cur, table)
+                cur.execute(f"""
+                    SELECT COUNT(*) AS total, COUNT(CASE WHEN outcome = 'not_found' THEN 1 END) AS not_found
+                    FROM {table} WHERE searched_at >= %s
+                """, (from_utc,))
+                search_counts[service] = cur.fetchone()
+        conn.commit()
+    finally:
+        conn.close()
+
+    start_day = started_at.astimezone(KST).date() if started_at else None
+    history = []
+    for offset in range(days):
+        day = first_day + timedelta(days=offset)
+        row = daily.get(day) or {"day": day, "views": 0, "visitors": 0}
+        history.append(row if start_day and day >= start_day else {"day": day, "views": None, "visitors": None})
+    return {
+        "started_at": started_at,
+        "totals": {
+            "views": totals["views"] if started_at else None,
+            "visitors": totals["visitors"] if started_at else None,
+            "searches": sum(search_counts[service]["total"] for service in ("weather", "mountain")),
+            "no_results": sum(search_counts[service]["not_found"] for service in ("weather", "mountain")),
+            "fishing_selections": search_counts["fishing"]["total"],
+        },
+        "daily": history, "pages": pages, "mountains": mountains,
+    }
+
+
 @router.post("/api/search-events", status_code=204)
 @router.post("/api/mountain/search-events", status_code=204)
 def record_mountain_search(event: MountainSearchEvent):
@@ -364,14 +492,13 @@ def list_mountain_searches(
 ):
     require_admin(x_admin_password, authorization, "system")
     table = SEARCH_TABLES[service]
-    if days not in (7, 30):
-        raise HTTPException(status_code=422, detail="7일 또는 30일을 선택하세요.")
+    _, from_utc = _usage_window(days)
     conn = get_conn()
     try:
         with conn.cursor() as cur:
             _prepare_search_events(cur, table)
-            window = "searched_at >= UTC_TIMESTAMP() - INTERVAL %s DAY"
-            cur.execute(f"SELECT outcome, COUNT(*) AS count FROM {table} WHERE {window} GROUP BY outcome", (days,))
+            window = "searched_at >= %s"
+            cur.execute(f"SELECT outcome, COUNT(*) AS count FROM {table} WHERE {window} GROUP BY outcome", (from_utc,))
             totals = {row["outcome"]: row["count"] for row in cur.fetchall()}
             rankings = {}
             for status in ("not_found", "no_course", "found"):
@@ -379,15 +506,15 @@ def list_mountain_searches(
                     SELECT term, COUNT(*) AS count FROM {table}
                     WHERE {window} AND outcome = %s
                     GROUP BY term ORDER BY count DESC, term LIMIT 10
-                """, (days, status))
+                """, (from_utc, status))
                 rankings[status] = cur.fetchall()
             cur.execute(f"""
                 SELECT DATE(searched_at + INTERVAL 9 HOUR) AS day, COUNT(*) AS count
                 FROM {table} WHERE {window} GROUP BY day ORDER BY day
-            """, (days,))
+            """, (from_utc,))
             daily = cur.fetchall()
             condition = "" if outcome == "all" else " AND outcome = %s"
-            args = (days,) if outcome == "all" else (days, outcome)
+            args = (from_utc,) if outcome == "all" else (from_utc, outcome)
             if term.strip():
                 condition += " AND LOCATE(%s, term) > 0"
                 args += (term.strip(),)
