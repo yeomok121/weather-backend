@@ -5,7 +5,7 @@ from pydantic import BaseModel, Field
 from app.fishing import get_fishing_areas, get_fishing_summary
 from app.fishing.service import get_fishing_points, get_point_index, summary_for_point
 from app.fishing.areas import get_area
-from app.fishing import favorites, gear
+from app.fishing import favorites, gear, ports
 from app.core.auth import _get_token_user
 from app.database import get_conn
 
@@ -41,6 +41,14 @@ def api_fishing_point_index(point_id: str):
     if result is None:
         raise HTTPException(status_code=404, detail="지원하지 않는 낚시 포인트입니다.")
     return result
+
+
+@router.get("/api/fishing/ports/nearby")
+def api_fishing_ports_nearby(lat: float, lon: float, limit: int = 3):
+    """좌표(보통 선택한 낚시 포인트) 근처 낚싯배 출항지와 배 수 (app/fishing/ports.py, 해경 공개자료)."""
+    if not (33 <= lat <= 39 and 124 <= lon <= 132):
+        raise HTTPException(status_code=422, detail="우리나라 바다 근처 좌표만 찾을 수 있습니다.")
+    return ports.nearby_ports(lat, lon, limit=max(1, min(limit, 5)))
 
 
 @router.get("/api/fishing/summary")

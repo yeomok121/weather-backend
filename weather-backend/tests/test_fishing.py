@@ -793,3 +793,48 @@ class PointIndexApiTests(unittest.TestCase):
         self.assertEqual([d['date'] for d in body['days']], ['2099-01-01', '2099-01-02'])
         self.assertTrue(all('fcstFishing' in url for url in calls))  # 해상예보·조위 등은 부르지 않음
         self.assertEqual(missing.status_code, 404)
+
+
+class NearbyPortsTests(unittest.TestCase):
+    """해경 출항지 자료(ports_data.json)로 가까운 낚싯배 출항지 찾기."""
+
+    def test_data_file_has_all_ports_with_korean_coordinates(self):
+        from app.fishing import ports
+        data = ports.load_ports()
+        self.assertEqual(len(data['ports']), 135)
+        self.assertEqual(len({p['id'] for p in data['ports']}), 135)
+        for port in data['ports']:
+            self.assertTrue(33 < port['lat'] < 39 and 124 < port['lon'] < 132, port)
+            self.assertGreaterEqual(port['ships'], 0)
+
+    def test_chuja_point_finds_chuja_port_first(self):
+        client = TestClient(app)
+        body = client.get('/api/fishing/ports/nearby', params={'lat': 33.9541, 'lon': 126.3108}).json()
+        self.assertEqual(body['ports'][0]['name'], '추자항')
+        self.assertLess(body['ports'][0]['distance_km'], 3)
+        self.assertEqual(body['ports'][0]['ships'], 10)
+        self.assertIsNone(body['nearest'])
+        self.assertEqual(body['base_date'], '2022-11')
+        distances = [p['distance_km'] for p in body['ports']]
+        self.assertEqual(distances, sorted(distances))
+        self.assertTrue(all(p['ships'] > 0 and p['distance_km'] <= body['radius_km'] for p in body['ports']))
+
+    def test_far_island_gets_only_nearest_port(self):
+        client = TestClient(app)
+        body = client.get('/api/fishing/ports/nearby', params={'lat': 34.07308, 'lon': 125.08805}).json()  # 가거도
+        self.assertEqual(body['ports'], [])
+        self.assertEqual(body['nearest']['name'], '서망항')
+        self.assertGreater(body['nearest']['distance_km'], 50)
+
+    def test_ports_with_no_ships_are_skipped(self):
+        client = TestClient(app)
+        body = client.get('/api/fishing/ports/nearby', params={'lat': 35.0386, 'lon': 129.0904, 'limit': 5}).json()  # 생도
+        names = [p['name'] for p in body['ports']]
+        self.assertEqual(names[0], '하리선착장')
+        self.assertNotIn('부산남항', names)  # 0척
+        self.assertLessEqual(len(names), 5)
+
+    def test_rejects_coordinates_outside_korean_seas(self):
+        client = TestClient(app)
+        self.assertEqual(client.get('/api/fishing/ports/nearby', params={'lat': 0, 'lon': 0}).status_code, 422)
+        self.assertEqual(client.get('/api/fishing/ports/nearby', params={'lat': 'x', 'lon': 126}).status_code, 422)
