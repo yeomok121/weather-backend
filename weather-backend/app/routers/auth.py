@@ -10,9 +10,10 @@ from app.core.auth_attempts import credential_attempt
 from app.core.auth import (
     AUTH_TOKEN_TTL_SECONDS, SignUpRequest, LoginRequest,
     _validate_new_username, validate_new_password, password_needs_update, _lock_username_changes,
+    _lock_admin_account_changes, _protect_last_superadmin,
     _auth_signing_key, create_member_session, revoke_member_session, _store_password_change, _get_token_user, _hash_pw, _verify_user,
 )
-from app.core.schema import _ensure_admin_tables, _ensure_user_favorites_table, _ensure_hiking_tables, ensure_member_sessions
+from app.core.schema import ACTIVE_SUSPENSION, _ensure_admin_tables, _ensure_user_favorites_table, _ensure_hiking_tables, ensure_member_sessions
 
 router = APIRouter()
 
@@ -75,7 +76,7 @@ def login(req: LoginRequest, request: Request):
         try:
             with conn.cursor() as cur:
                 _ensure_admin_tables(cur)
-                cur.execute("SELECT u.*, COALESCE(m.suspended, 0) AS suspended, COALESCE(m.token_version, 0) AS token_version FROM users u LEFT JOIN admin_user_metadata m ON m.user_id = u.id WHERE u.username = %s", (req.username,))
+                cur.execute(f"SELECT u.*, {ACTIVE_SUSPENSION} AS suspended, COALESCE(m.token_version, 0) AS token_version FROM users u LEFT JOIN admin_user_metadata m ON m.user_id = u.id WHERE u.username = %s", (req.username,))
                 user = cur.fetchone()
                 password = req.password.encode("utf-8")
                 if not user or len(password) > 72 or not bcrypt.checkpw(password, user["password_hash"].encode("utf-8")):
@@ -215,8 +216,11 @@ def delete_user(req: DeleteUserRequest, request: Request):
         conn = get_conn()
         try:
             with conn.cursor() as cur:
-                user = _verify_user(cur, req.username, req.password)
+                _ensure_admin_tables(cur)
                 _ensure_hiking_tables(cur)
+                _lock_admin_account_changes(cur)
+                user = _verify_user(cur, req.username, req.password, lock=True)
+                _protect_last_superadmin(cur, user['id'])
                 cur.execute("SELECT 1 FROM hiking_party_members WHERE user_id = %s LIMIT 1", (user['id'],))
                 if cur.fetchone():
                     raise HTTPException(status_code=409, detail="회원 탈퇴 전에 참여 중인 파티에서 나가거나 파티장 권한을 넘겨 주세요")

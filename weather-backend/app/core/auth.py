@@ -13,7 +13,7 @@ import bcrypt
 from fastapi import HTTPException
 from pydantic import BaseModel
 
-from app.core.schema import _ensure_admin_tables, ensure_member_sessions
+from app.core.schema import ACTIVE_SUSPENSION, _ensure_admin_tables, ensure_member_sessions
 
 AUTH_TOKEN_TTL_SECONDS = 60 * 60 * 24 * 7
 
@@ -85,6 +85,20 @@ def _lock_username_changes(cur):
     if cur.fetchone()['acquired'] != 1:
         raise HTTPException(status_code=503, detail='아이디 확인이 지연되고 있습니다. 잠시 후 다시 시도해주세요')
 
+def _lock_admin_account_changes(cur):
+    cur.execute("SELECT GET_LOCK('weather_admin_accounts_v1', 10) AS acquired")
+    if cur.fetchone()['acquired'] != 1:
+        raise HTTPException(status_code=503, detail='계정 상태 변경이 처리 중입니다. 잠시 후 다시 시도해 주세요.')
+
+def _protect_last_superadmin(cur, user_id):
+    cur.execute(f"""
+        SELECT user_id FROM admin_user_metadata m
+        WHERE role = 'superadmin' AND NOT {ACTIVE_SUSPENSION} FOR UPDATE
+    """)
+    active_admins = [row["user_id"] for row in cur.fetchall()]
+    if active_admins == [user_id]:
+        raise HTTPException(status_code=409, detail='마지막으로 활성화된 최고 관리자 계정은 변경할 수 없습니다.')
+
 def _auth_signing_key() -> bytes:
     secret = os.getenv("AUTH_SECRET_KEY", "")
     if len(secret) < 32:
@@ -119,13 +133,13 @@ def _get_token_user(cur, authorization: str | None):
     digest = _session_digest(authorization)
     _ensure_admin_tables(cur)
     ensure_member_sessions(cur)
-    cur.execute("""
+    cur.execute(f"""
         SELECT u.id, u.username, u.name, s.token_version, COALESCE(m.role, 'member') AS role
         FROM member_sessions s
         JOIN users u ON u.id = s.user_id
         LEFT JOIN admin_user_metadata m ON m.user_id = u.id
         WHERE s.token_digest = %s AND s.expires_at > %s
-          AND s.token_version = COALESCE(m.token_version, 0) AND COALESCE(m.suspended, 0) = 0
+          AND s.token_version = COALESCE(m.token_version, 0) AND NOT {ACTIVE_SUSPENSION}
     """, (digest, int(time.time())))
     user = cur.fetchone()
     if not user:
@@ -146,7 +160,7 @@ def _verify_user(cur, username: str, password: str, *, lock=False):
     if not user or len(password.encode("utf-8")) > 72 or not bcrypt.checkpw(password.encode("utf-8"), user["password_hash"].encode("utf-8")):
         raise HTTPException(status_code=401, detail="비밀번호가 올바르지 않습니다")
     _ensure_admin_tables(cur)
-    cur.execute("SELECT suspended FROM admin_user_metadata WHERE user_id = %s", (user['id'],))
+    cur.execute(f"SELECT {ACTIVE_SUSPENSION} AS suspended FROM admin_user_metadata m WHERE user_id = %s", (user['id'],))
     metadata = cur.fetchone()
     if metadata and metadata['suspended']:
         raise HTTPException(status_code=403, detail="이용이 정지된 계정입니다")

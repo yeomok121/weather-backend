@@ -11,6 +11,12 @@ _hiking_schema_lock = threading.Lock()
 _admin_schema_ready = False
 _admin_schema_lock = threading.Lock()
 
+# Use with admin_user_metadata aliased as m.
+ACTIVE_SUSPENSION = """(COALESCE(m.suspended, 0) = 1 AND NOT EXISTS (
+    SELECT 1 FROM admin_member_suspensions s
+    WHERE s.user_id = m.user_id AND s.until_at <= UTC_TIMESTAMP()
+))"""
+
 def _ensure_admin_tables(cur):
     global _admin_schema_ready
     if _admin_schema_ready:
@@ -29,6 +35,14 @@ def _ensure_admin_tables(cur):
             action VARCHAR(40) NOT NULL, target_id INT NULL, target_username VARCHAR(120) NOT NULL,
             created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
             KEY idx_admin_audit_target (target_id, created_at)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4''')
+        cur.execute('''CREATE TABLE IF NOT EXISTS admin_member_suspensions (
+            user_id INT PRIMARY KEY, reason VARCHAR(500) NOT NULL, until_at DATETIME NULL,
+            CONSTRAINT fk_admin_suspension_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4''')
+        cur.execute('''CREATE TABLE IF NOT EXISTS admin_member_action_notes (
+            audit_id BIGINT PRIMARY KEY, reason VARCHAR(500) NOT NULL,
+            CONSTRAINT fk_admin_member_note_audit FOREIGN KEY (audit_id) REFERENCES admin_audit_log(id) ON DELETE CASCADE
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4''')
         _admin_schema_ready = True
 

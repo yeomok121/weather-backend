@@ -4,7 +4,9 @@ from uuid import uuid4
 from unittest.mock import MagicMock, patch
 
 from fastapi.testclient import TestClient
+from fastapi import HTTPException
 
+from app.core.auth import _protect_last_superadmin
 from app.main import app
 from app.routers import admin, notices
 
@@ -24,6 +26,30 @@ class AdminOperationsTests(unittest.TestCase):
         self.assertEqual(client.post("/api/page-views", json={**ids, "page": "admin"}).status_code, 422)
         self.assertEqual(client.post("/api/page-views", json={**ids, "page": "mountain", "mountain": "등록되지 않은 산"}).status_code, 422)
         self.assertEqual(client.post("/api/page-views", json={**ids, "page": "weather", "mountain": "북한산"}).status_code, 422)
+
+    @patch.object(admin, "require_admin", return_value={"name": "operator", "role": "superadmin"})
+    def test_even_superadmin_cannot_set_a_members_password(self, auth):
+        response = TestClient(app).put("/api/admin/users/1", json={
+            "username": "member1", "name": "회원", "password": "example!99",
+        })
+        self.assertEqual(response.status_code, 403)
+        auth.assert_called_once_with(None, None, "members")
+
+    @patch.object(admin, "require_admin", return_value={"name": "operator", "role": "member_manager"})
+    def test_member_manager_cannot_change_roles(self, auth):
+        response = TestClient(app).patch("/api/admin/users/1/state", json={"role": "member_manager", "reason": "테스트"})
+        self.assertEqual(response.status_code, 403)
+        auth.assert_called_once_with(None, None, "members")
+
+    def test_last_active_superadmin_is_protected(self):
+        cursor = MagicMock()
+        cursor.fetchall.return_value = [{"user_id": 1}]
+        with self.assertRaises(HTTPException) as error:
+            _protect_last_superadmin(cursor, 1)
+        self.assertEqual(error.exception.status_code, 409)
+        _protect_last_superadmin(cursor, 2)
+        cursor.fetchall.return_value += [{"user_id": 2}]
+        _protect_last_superadmin(cursor, 1)
 
     @patch.object(admin, "_usage_window", return_value=(date(2026, 11, 19), datetime(2026, 11, 18, 15)))
     @patch.object(admin, "get_conn")

@@ -17,7 +17,7 @@ from app.core.auth import (
     validate_new_password,
 )
 from app.core.auth_attempts import credential_attempt
-from app.core.schema import _ensure_admin_tables, ensure_member_recovery
+from app.core.schema import ACTIVE_SUSPENSION, _ensure_admin_tables, ensure_member_recovery
 from app.database import get_conn
 
 router = APIRouter(prefix="/api/auth", tags=["account recovery"])
@@ -82,7 +82,7 @@ def locked_account(cur, value, by_id=False):
     column = "u.id" if by_id else "u.username"
     cur.execute(f"""
         SELECT u.id, u.username, u.password_hash, COALESCE(m.token_version, 0) AS token_version,
-               COALESCE(m.suspended, 0) AS suspended, e.email
+               {ACTIVE_SUSPENSION} AS suspended, e.email
         FROM users u
         LEFT JOIN admin_user_metadata m ON m.user_id=u.id
         LEFT JOIN member_recovery_email e ON e.user_id=u.id
